@@ -1,11 +1,11 @@
-# ecliptica_bot.py — v0.6.3 (concise signal‑card format, syntax fix)
+# ecliptica_bot.py — v0.6.3 (concise signal‑card format, syntax fix v2)
 """Ecliptica Perps Assistant — minimal Telegram trading bot with concise card output
 
 Changes in v0.6.3
 ──────────────────
 • `/ask` wraps REI call with a system‑prompt enforcing the 8‑line signal‑card template.
 • Bot trims everything after the “📄 Details” marker for concise display and sends secondary thought separately.
-• Syntax fix: corrected f-string for secondary thought.
+• Syntax fix: corrected string literal for secondary thought.
 
 Dependencies
     python-telegram-bot==20.7
@@ -87,7 +87,6 @@ def sub_active(uid: int) -> bool:
 # ───────────────────────────── rei helper ───────────────────────────────── #
 
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
-    # system prompt enforces concise 8-line card
     template = (
         "You are a crypto-perps signal generator. Reply using THIS EXACT 8-line card and nothing else:" +
         "\nLINE1: emoji direction (🟢 LONG / 🔴 SHORT / 🟡 WAIT) ASSET – confidence %" +
@@ -102,7 +101,10 @@ def rei_call(prompt: str, profile: dict[str, str]) -> str:
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
     msgs = [{"role": "system", "content": template}]
     if profile:
-        msgs.append({"role": "user", "content": "Trader profile:\n" + "\n".join(f"{k}: {v}" for k, v in profile.items())})
+        msgs.append({
+            "role": "user",
+            "content": "Trader profile:\n" + "\n".join(f"{k}: {v}" for k, v in profile.items())
+        })
     msgs.append({"role": "user", "content": prompt})
     body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": msgs}
     r = requests.post(
@@ -122,11 +124,15 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("/setup – profile wizard\n/ask BTC outlook? – quick answer\n/faq – perps primer")
+    await update.message.reply_text(
+        "/setup – profile wizard\n/ask BTC outlook? – quick answer\n/faq – perps primer"
+    )
 
 async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        textwrap.dedent("""*Perps 101*\n• Funding every 8h\n• Mark price avoids wicks\n• Keep margin buffer"""),
+        textwrap.dedent(
+            """*Perps 101*\n• Funding every 8h\n• Mark price avoids wicks\n• Keep margin buffer"""
+        ),
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -182,8 +188,7 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(parts) > 1 and parts[1].strip():
         details = parts[1].strip()
         await update.message.reply_text(
-            "*Secondary Thought:*
-" + details,
+            "*Secondary Thought:*\n" + details,
             parse_mode=ParseMode.MARKDOWN,
         )
 
