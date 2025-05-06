@@ -1,11 +1,12 @@
-# ecliptica_bot.py — v0.6.1 (rate‑limiter removed for simpler deploy)
-"""Ecliptica Perps Assistant — minimal Telegram trading bot (no external extras).
+# ecliptica_bot.py — v0.6.2 (asyncio executor, REI v1 path)
+"""Ecliptica Perps Assistant — minimal Telegram trading bot
 
-Changes vs v0.6
-────────────────
-• Removed `AIORateLimiter()` to avoid optional PTB extra; now runs with base
-  `python-telegram-bot` install.
-• No other logic changed.
+Changes in v0.6.2
+──────────────────
+• `/ask` now off‑loads the blocking `rei_call()` via `asyncio.get_running_loop().run_in_executor`,
+  fixing the AttributeError seen with `.run_async()`.
+• REI endpoint updated to `/v1/chat/completions` and timeout bumped to 60 s.
+• Rest unchanged: 7‑step profile wizard, SQLite, no rate‑limiter.
 
 Dependencies
     python-telegram-bot==20.7
@@ -15,26 +16,26 @@ Dependencies
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import os
 import sqlite3
 import textwrap
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Final, Optional
 
-from dotenv import load_dotenv
 import requests
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from dotenv import load_dotenv
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
     MessageHandler,
-    PreCheckoutQueryHandler,
     filters,
 )
 
@@ -47,7 +48,6 @@ STRIPE_TOKEN: Optional[str] = os.getenv("TELEGRAM_PROVIDER_TOKEN")
 COINBASE_KEY: Optional[str] = os.getenv("COINBASE_COMMERCE_API_KEY")
 
 DB = "ecliptica.db"
-EXPIRY_DAYS = 30
 
 QUESTS: Final[list[tuple[str, str]]] = [
     ("experience", "Your perps experience? (0‑3m / 3‑12m / >12m)"),
@@ -65,8 +65,8 @@ SETUP, = range(1)
 
 def init_db() -> None:
     with sqlite3.connect(DB) as con:
-        con.execute("""CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)""")
-        con.execute("""CREATE TABLE IF NOT EXISTS sub (uid INTEGER PRIMARY KEY, exp TEXT)""")
+        con.execute("CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)")
+        con.execute("CREATE TABLE IF NOT EXISTS sub (uid INTEGER PRIMARY KEY, exp TEXT)")
 
 
 def save_profile(uid: int, data: dict[str, str]) -> None:
@@ -76,61 +76,71 @@ def save_profile(uid: int, data: dict[str, str]) -> None:
 
 def load_profile(uid: int) -> dict[str, str]:
     with sqlite3.connect(DB) as con:
-        cur = con.cursor(); cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
+        cur = con.cursor()
+        cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
         row = cur.fetchone()
     return json.loads(row[0]) if row else {}
 
 
 def sub_active(uid: int) -> bool:
     with sqlite3.connect(DB) as con:
-        cur = con.cursor(); cur.execute("SELECT exp FROM sub WHERE uid=?", (uid,))
+        cur = con.cursor()
+        cur.execute("SELECT exp FROM sub WHERE uid=?", (uid,))
         row = cur.fetchone()
-    return row and datetime.fromisoformat(row[0]) > datetime.now(timezone.utc)
+    return bool(row) and datetime.fromisoformat(row[0]) > datetime.now(timezone.utc)
 
-# ───────────────────────────── rei request ───────────────────────────────── #
+# ───────────────────────────── rei helper ────────────────────────────────── #
 
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
-    msgs = []
+    messages = []
     if profile:
-        p_txt = "\n".join(f"{k}: {v}" for k, v in profile.items())
-        msgs.append({"role": "user", "content": f"Trader profile:\n{p_txt}"})
-    msgs.append({"role": "user", "content": prompt})
-    body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": msgs}
-    r = requests.post("https://api.reisearch.box/v1/chat/completions", headers=headers, json=body, timeout=60) #increase the timeout if it still fails
+        profile_txt = "\n".join(f"{k}: {v}" for k, v in profile.items())
+        messages.append({"role": "user", "content": f"Trader profile:\n{profile_txt}"})
+    messages.append({"role": "user", "content": prompt})
+    body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": messages}
+    r = requests.post("https://api.reisearch.box/v1/chat/completions", headers=headers, json=body, timeout=60)
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"].strip()
 
 # ───────────────────────────── telegram callbacks ────────────────────────── #
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Welcome to *Ecliptica Perps Assistant*!\nUse /setup then /ask <question>.", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        "👋 Welcome to *Ecliptica Perps Assistant*!\nUse /setup then /ask <question>.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("/setup – profile wizard\n/ask BTC outlook? – personalised answer\n/faq – quick perps primer")
 
 async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(textwrap.dedent("""
-    *Perps 101*\n• Funding: paid every 8h between longs & shorts.\n• Mark price: fair reference to avoid wicks.\n• Keep a healthy margin buffer!"""), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        textwrap.dedent(
+            """*Perps 101*\n• Funding every 8 h\n• Mark price avoids wicks\n• Keep margin buffer"""
+        ),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 # ---------- setup wizard ---------- #
 async def setup_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["i"] = 0; ctx.user_data["ans"] = {}
+    ctx.user_data["idx"] = 0
+    ctx.user_data["ans"] = {}
     await update.message.reply_text("Let's set up your profile – /cancel anytime.")
     return await ask_next(update, ctx)
 
 async def ask_next(update_or_q, ctx):
-    i = ctx.user_data["i"]
-    if i >= len(QUESTS):
+    idx = ctx.user_data["idx"]
+    if idx >= len(QUESTS):
         save_profile(update_or_q.effective_user.id, ctx.user_data["ans"])
         await update_or_q.message.reply_text("✅ Saved! Now /ask your first question.")
         return ConversationHandler.END
-    key, q = QUESTS[i]
-    await update_or_q.message.reply_text(f"[{i+1}/{len(QUESTS)}] {q}")
+    key, q = QUESTS[idx]
+    await update_or_q.message.reply_text(f"[{idx+1}/{len(QUESTS)}] {q}")
     return SETUP
 
 async def collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["ans"][QUESTS[ctx.user_data["i"]][0]] = update.message.text.strip()
-    ctx.user_data["i"] += 1
+    ctx.user_data["ans"][QUESTS[ctx.user_data["idx"]][0]] = update.message.text.strip()
+    ctx.user_data["idx"] += 1
     return await ask_next(update, ctx)
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -144,7 +154,14 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = " ".join(ctx.args) or "Give me a market outlook."
     await update.message.reply_text("Thinking…")
     prof = load_profile(update.effective_user.id)
-    ans = await ctx.application.run_async(rei_call, q, prof)
+    try:
+        ans = await asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(rei_call, q, prof)
+        )
+    except Exception as e:
+        logging.exception("REI error")
+        await update.message.reply_text("⚠️ REI CORE did not respond – check API key or try later.")
+        return
     await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
 
 # ───────────────────────────── main ─────────────────────────────────────── #
@@ -152,6 +169,7 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     init_db()
+
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -167,6 +185,7 @@ def main():
     app.add_handler(wizard)
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
