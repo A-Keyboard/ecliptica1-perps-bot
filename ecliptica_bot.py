@@ -172,14 +172,14 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("faq", faq_cmd))
-    app.add_handler(CommandHandler("ask", ask_cmd))
+        app.add_handler(wizard)
 
-    wizard = ConversationHandler(
-        entry_points=[CommandHandler("setup", setup_start)],
-        states={SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
+    app.run_polling(
+        allowed_updates=["message", "callback_query"],
+        poll_interval=1.0,
+        close_loop=False,
     )
-    app.add
+
+
+if __name__ == "__main__":
+    main()
