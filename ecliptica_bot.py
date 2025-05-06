@@ -87,36 +87,21 @@ def sub_active(uid: int) -> bool:
 # ───────────────────────────── rei helper ───────────────────────────────── #
 
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
-    template = (
-        "You are a crypto-perps signal generator. Reply using THIS EXACT 8-line card and nothing else:" +
-        "
-LINE1: emoji direction (🟢 LONG / 🔴 SHORT / 🟡 WAIT) ASSET – confidence %" +
-        "
-LINE2: ≤15-word context sentence" +
-        "
-LINE3: (blank)" +
-        "
-LINE4: Short plan — Entry $… • SL $… • TP $… (R:R)" +
-        "
-LINE5: Swing plan — Entry $… • SL $… • TP $… (R:R) or leave blank" +
-        "
-LINE6: (blank or second plan)" +
-        "
-LINE7: Risk tips (start with –)" +
-        "
-LINE8: 📄 Details (leave literal)" +
-        "
+    # system prompt enforces concise 8-line card
+    asset = prompt.split()[0].upper()
+    template = f"""
+You are a crypto-perps signal generator. Reply using THIS EXACT 8-line card and nothing else:
+LINE1: emoji direction (🟢 LONG / 🔴 SHORT / 🟡 WAIT) {asset} – confidence %
+LINE2: ≤15-word context sentence
+LINE3: (blank)
+LINE4: Short plan — Entry $… • SL $… • TP $… (R:R)
+LINE5: Swing plan — Entry $… • SL $… • TP $… (R:R) or leave blank
+LINE6: (blank or second plan)
+LINE7: Risk tips (start with –)
+LINE8: 📄 Details (leave literal)
 
-IMPORTANT: Use the provided Trader profile above to tailor your recommendations; do not ask for additional profile details."
-    ) ASSET – confidence %" +
-        "\nLINE2: ≤15-word context sentence" +
-        "\nLINE3: (blank)" +
-        "\nLINE4: Short plan — Entry $… • SL $… • TP $… (R:R)" +
-        "\nLINE5: Swing plan — Entry $… • SL $… • TP $… (R:R) or leave blank" +
-        "\nLINE6: (blank or second plan)" +
-        "\nLINE7: Risk tips (start with –)" +
-        "\nLINE8: 📄 Details (leave literal)"
-    )
+IMPORTANT: Use the provided Trader profile above to tailor your recommendations; do not ask for additional profile details.
+"""
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
     msgs = [{"role": "system", "content": template}]
     if profile:
@@ -251,4 +236,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
