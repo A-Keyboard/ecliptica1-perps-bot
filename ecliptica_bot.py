@@ -89,7 +89,26 @@ def sub_active(uid: int) -> bool:
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
     template = (
         "You are a crypto-perps signal generator. Reply using THIS EXACT 8-line card and nothing else:" +
-        "\nLINE1: emoji direction (🟢 LONG / 🔴 SHORT / 🟡 WAIT) ASSET – confidence %" +
+        "
+LINE1: emoji direction (🟢 LONG / 🔴 SHORT / 🟡 WAIT) ASSET – confidence %" +
+        "
+LINE2: ≤15-word context sentence" +
+        "
+LINE3: (blank)" +
+        "
+LINE4: Short plan — Entry $… • SL $… • TP $… (R:R)" +
+        "
+LINE5: Swing plan — Entry $… • SL $… • TP $… (R:R) or leave blank" +
+        "
+LINE6: (blank or second plan)" +
+        "
+LINE7: Risk tips (start with –)" +
+        "
+LINE8: 📄 Details (leave literal)" +
+        "
+
+IMPORTANT: Use the provided Trader profile above to tailor your recommendations; do not ask for additional profile details."
+    ) ASSET – confidence %" +
         "\nLINE2: ≤15-word context sentence" +
         "\nLINE3: (blank)" +
         "\nLINE4: Short plan — Entry $… • SL $… • TP $… (R:R)" +
@@ -171,6 +190,11 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = " ".join(ctx.args) or "Give me a market outlook."
     await update.message.reply_text("Thinking…")
     prof = load_profile(update.effective_user.id)
+    if not prof:
+        await update.message.reply_text(
+            "⚠️ I don't have your profile yet. Please run /setup to provide your trading parameters."
+        )
+        return
 
     try:
         full_card = await asyncio.get_running_loop().run_in_executor(
@@ -227,3 +251,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
