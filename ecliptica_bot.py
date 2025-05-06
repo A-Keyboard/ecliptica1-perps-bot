@@ -1,11 +1,10 @@
-# ecliptica_bot.py — v0.7 (compact signal card template)
+# ecliptica_bot.py — v0.7.1 (indent fix & full handler block)
 """Ecliptica Perps Assistant — Telegram trading bot
 
-Key changes in v0.7
-───────────────────
-• Added *8‑line signal‑card* system prompt so REI CORE returns a concise reply.
-• `/ask` runs blocking call in executor and shows only the card (hides details).
-• Increased REI timeout to 60 s.
+v0.7.1
+───────
+• Fixed indentation error that crashed container.
+• Restored full handler block in `main()`.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import os
 import sqlite3
 import textwrap
 from datetime import datetime, timezone
-from typing import Final, Optional
+from typing import Final
 
 import requests
 from dotenv import load_dotenv
@@ -172,14 +171,16 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
-        app.add_handler(wizard)
+    # command handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("faq", faq_cmd))
+    app.add_handler(CommandHandler("ask", ask_cmd))
 
-    app.run_polling(
-        allowed_updates=["message", "callback_query"],
-        poll_interval=1.0,
-        close_loop=False,
+    # wizard handler
+    wizard = ConversationHandler(
+        entry_points=[CommandHandler("setup", setup_start)],
+        states={SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]},
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
-
-
-if __name__ == "__main__":
-    main()
+    app.add_handler
