@@ -154,25 +154,34 @@ async def cancel(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # /ask handler
-async def ask_cmd(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not sub_active(update.effective_user.id):
         await update.message.reply_text("Subscription not active – free mode.")
-    question=" ".join(ctx.args) or "Give me a market outlook."
+
+    q = " ".join(ctx.args) or "Give me a market outlook."
     await update.message.reply_text("Thinking…")
-    profile=load_profile(update.effective_user.id)
+    prof = load_profile(update.effective_user.id)
+
     try:
-        card=await asyncio.get_running_loop().run_in_executor(
-            None, functools.partial(rei_call,question,profile)
+        full_card = await asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(rei_call, q, prof)
         )
     except Exception:
         logging.exception("REI error")
         await update.message.reply_text("⚠️ REI CORE did not respond – try later.")
         return
-    concise=card.split("📄",1)[0].strip()
-    await update.message.reply_text(concise,parse_mode=ParseMode.MARKDOWN)
 
-# ───────────────────────────── main entrypoint ────────────────────────────── #
+    parts = full_card.split("📄", 1)
+    concise = parts[0].strip()
+    await update.message.reply_text(concise, parse_mode=ParseMode.MARKDOWN)
 
+    if len(parts) > 1 and parts[1].strip():
+        details = parts[1].strip()
+        await update.message.reply_text(
+            f"*Secondary Thought:*
+{details}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
