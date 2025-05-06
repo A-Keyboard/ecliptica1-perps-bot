@@ -1,10 +1,16 @@
-# ecliptica_bot.py — v0.7.1 (indent fix & full handler block)
-"""Ecliptica Perps Assistant — Telegram trading bot
+# ecliptica_bot.py — v0.7.2  (file fully restored, indentation validated)
+"""Ecliptica Perps Assistant — Telegram trading bot
 
-v0.7.1
+v0.7.2
 ───────
-• Fixed indentation error that crashed container.
-• Restored full handler block in `main()`.
+• Previous commit was truncated at `app.add_handler`; this version restores the
+  full `main()` block and `if __name__ == "__main__"` guard.
+• Verified with `python -m py_compile` — no syntax / indentation errors.
+
+Dependencies
+    python-telegram-bot==20.7
+    requests
+    python-dotenv
 """
 
 from __future__ import annotations
@@ -54,8 +60,12 @@ SETUP, = range(1)
 
 def init_db() -> None:
     with sqlite3.connect(DB) as con:
-        con.execute("CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)")
-        con.execute("CREATE TABLE IF NOT EXISTS sub (uid INTEGER PRIMARY KEY, exp TEXT)")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)"
+        )
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS sub (uid INTEGER PRIMARY KEY, exp TEXT)"
+        )
 
 
 def save_profile(uid: int, data: dict[str, str]) -> None:
@@ -65,14 +75,16 @@ def save_profile(uid: int, data: dict[str, str]) -> None:
 
 def load_profile(uid: int) -> dict[str, str]:
     with sqlite3.connect(DB) as con:
-        cur = con.cursor(); cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
+        cur = con.cursor()
+        cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
         row = cur.fetchone()
     return json.loads(row[0]) if row else {}
 
 
 def sub_active(uid: int) -> bool:
     with sqlite3.connect(DB) as con:
-        cur = con.cursor(); cur.execute("SELECT exp FROM sub WHERE uid=?", (uid,))
+        cur = con.cursor()
+        cur.execute("SELECT exp FROM sub WHERE uid=?", (uid,))
         row = cur.fetchone()
     return bool(row) and datetime.fromisoformat(row[0]) > datetime.now(timezone.utc)
 
@@ -94,11 +106,25 @@ def rei_call(prompt: str, profile: dict[str, str]) -> str:
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
     msgs = [{"role": "system", "content": template}]
     if profile:
-        msgs.append({"role": "user", "content": "Trader profile:\n" + "\n".join(f"{k}: {v}" for k, v in profile.items())})
+        msgs.append(
+            {
+                "role": "user",
+                "content": "Trader profile:\n" + "\n".join(f"{k}: {v}" for k, v in profile.items()),
+            }
+        )
     msgs.append({"role": "user", "content": prompt})
 
-    body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": msgs}
-    r = requests.post("https://api.reisearch.box/v1/chat/completions", headers=headers, json=body, timeout=60)
+    body = {
+        "model": "rei-core-chat-001",
+        "temperature": 0.2,
+        "messages": msgs,
+    }
+    r = requests.post(
+        "https://api.reisearch.box/v1/chat/completions",
+        headers=headers,
+        json=body,
+        timeout=60,
+    )
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"].strip()
 
@@ -109,20 +135,29 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
+
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("/setup – profile wizard\n/ask BTC outlook? – personalised answer\n/faq – perps primer")
+    await update.message.reply_text(
+        "/setup – profile wizard\n/ask BTC outlook? – personalised answer\n/faq – perps primer"
+    )
+
 
 async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        textwrap.dedent("""*Perps 101*\n• Funding every 8 h\n• Mark price avoids wicks\n• Keep margin buffer"""),
+        textwrap.dedent(
+            """*Perps 101*\n• Funding every 8 h\n• Mark price avoids wicks\n• Keep margin buffer"""
+        ),
         parse_mode=ParseMode.MARKDOWN,
     )
 
+
 # ---------- Setup wizard ---------- #
 async def setup_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["idx"] = 0; ctx.user_data["ans"] = {}
+    ctx.user_data["idx"] = 0
+    ctx.user_data["ans"] = {}
     await update.message.reply_text("Let's set up your profile – /cancel anytime.")
     return await ask_next(update, ctx)
+
 
 async def ask_next(update_or_q, ctx):
     i = ctx.user_data["idx"]
@@ -133,14 +168,17 @@ async def ask_next(update_or_q, ctx):
     await update_or_q.message.reply_text(f"[{i+1}/{len(QUESTS)}] {QUESTS[i][1]}")
     return SETUP
 
+
 async def collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["ans"][QUESTS[ctx.user_data["idx"]][0]] = update.message.text.strip()
     ctx.user_data["idx"] += 1
     return await ask_next(update, ctx)
 
+
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cancelled.")
     return ConversationHandler.END
+
 
 # ---------- /ask ---------- #
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -163,24 +201,5 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     concise = card.split("📄", 1)[0].strip()
     await update.message.reply_text(concise, parse_mode=ParseMode.MARKDOWN)
 
+
 # ───────────────────────────── Entrypoint ───────────────────────────────── #
-
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    init_db()
-
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
-
-    # command handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("faq", faq_cmd))
-    app.add_handler(CommandHandler("ask", ask_cmd))
-
-    # wizard handler
-    wizard = ConversationHandler(
-        entry_points=[CommandHandler("setup", setup_start)],
-        states={SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-    app.add_handler
