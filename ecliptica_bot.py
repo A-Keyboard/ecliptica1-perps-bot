@@ -156,7 +156,7 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     init_db()
-    app = (Application.builder().token(BOT_TOKEN).concurrent_updates(True).rate_limiter(AIORateLimiter()).build())
+    app = (Application.builder().token(BOT_TOKEN).concurrent_updates(True).build())
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
