@@ -97,7 +97,7 @@ def rei_call(prompt: str, profile: dict[str, str]) -> str:
         msgs.append({"role": "user", "content": f"Trader profile:\n{p_txt}"})
     msgs.append({"role": "user", "content": prompt})
     body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": msgs}
-    r = requests.post("https://api.reisearch.box/chat/completions", headers=headers, json=body, timeout=15)
+    r = requests.post("https://api.reisearch.box/v1/chat/completions", headers=headers, json=body, timeout=60) #increase the timeout if it still fails
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"].strip()
 
