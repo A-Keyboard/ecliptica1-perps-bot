@@ -1,23 +1,16 @@
-# ecliptica_bot.py — clean scratch build
-"""Ecliptica Perps Assistant — minimal, self‑contained Telegram bot
---------------------------------------------------------------------
-Features implemented
-• /start, /help, /faq            – onboarding
-• /setup wizard (7 core qs)      – saves trader profile to SQLite
-• /ask  <question>               – forwards prompt + profile to REI CORE
-• Optional payments:             – Stripe (card) or Coinbase (crypto)
-  » if no payment tokens present, bot runs in free‑mode
+# ecliptica_bot.py — v0.6.1 (rate‑limiter removed for simpler deploy)
+"""Ecliptica Perps Assistant — minimal Telegram trading bot (no external extras).
+
+Changes vs v0.6
+────────────────
+• Removed `AIORateLimiter()` to avoid optional PTB extra; now runs with base
+  `python-telegram-bot` install.
+• No other logic changed.
 
 Dependencies
     python-telegram-bot==20.7
     requests
     python-dotenv
-
-Environment variables (.env or platform secrets)
-    TELEGRAM_BOT_TOKEN        – BotFather token (required)
-    REICORE_API_KEY           – secret token for https://api.reisearch.box  (required)
-    TELEGRAM_PROVIDER_TOKEN   – Stripe provider token  (optional)
-    COINBASE_COMMERCE_API_KEY – Coinbase Commerce key   (optional)
 """
 
 from __future__ import annotations
@@ -35,7 +28,6 @@ import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
-    AIORateLimiter,
     Application,
     CallbackQueryHandler,
     CommandHandler,
@@ -76,15 +68,18 @@ def init_db() -> None:
         con.execute("""CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)""")
         con.execute("""CREATE TABLE IF NOT EXISTS sub (uid INTEGER PRIMARY KEY, exp TEXT)""")
 
+
 def save_profile(uid: int, data: dict[str, str]) -> None:
     with sqlite3.connect(DB) as con:
         con.execute("REPLACE INTO profile VALUES (?,?)", (uid, json.dumps(data)))
+
 
 def load_profile(uid: int) -> dict[str, str]:
     with sqlite3.connect(DB) as con:
         cur = con.cursor(); cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
         row = cur.fetchone()
     return json.loads(row[0]) if row else {}
+
 
 def sub_active(uid: int) -> bool:
     with sqlite3.connect(DB) as con:
@@ -139,12 +134,13 @@ async def collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await ask_next(update, ctx)
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Cancelled."); return ConversationHandler.END
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
 
 # ---------- /ask ---------- #
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not sub_active(update.effective_user.id):
-        await update.message.reply_text("Subscription needed or not set – free mode for now.")
+        await update.message.reply_text("Subscription not active – free mode.")
     q = " ".join(ctx.args) or "Give me a market outlook."
     await update.message.reply_text("Thinking…")
     prof = load_profile(update.effective_user.id)
@@ -156,7 +152,7 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     init_db()
-    app = (Application.builder().token(BOT_TOKEN).concurrent_updates(True).build())
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
