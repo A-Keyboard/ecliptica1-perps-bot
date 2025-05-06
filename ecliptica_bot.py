@@ -1,17 +1,11 @@
-# ecliptica_bot.py — v0.6.2 (asyncio executor, REI v1 path)
-"""Ecliptica Perps Assistant — minimal Telegram trading bot
+# ecliptica_bot.py — v0.7 (compact signal card template)
+"""Ecliptica Perps Assistant — Telegram trading bot
 
-Changes in v0.6.2
-──────────────────
-• `/ask` now off‑loads the blocking `rei_call()` via `asyncio.get_running_loop().run_in_executor`,
-  fixing the AttributeError seen with `.run_async()`.
-• REI endpoint updated to `/v1/chat/completions` and timeout bumped to 60 s.
-• Rest unchanged: 7‑step profile wizard, SQLite, no rate‑limiter.
-
-Dependencies
-    python-telegram-bot==20.7
-    requests
-    python-dotenv
+Key changes in v0.7
+───────────────────
+• Added *8‑line signal‑card* system prompt so REI CORE returns a concise reply.
+• `/ask` runs blocking call in executor and shows only the card (hides details).
+• Increased REI timeout to 60 s.
 """
 
 from __future__ import annotations
@@ -44,12 +38,9 @@ load_dotenv()
 # ───────────────────────────── configuration ────────────────────────────── #
 BOT_TOKEN: Final[str] = os.environ["TELEGRAM_BOT_TOKEN"]
 REI_KEY: Final[str] = os.environ["REICORE_API_KEY"]
-STRIPE_TOKEN: Optional[str] = os.getenv("TELEGRAM_PROVIDER_TOKEN")
-COINBASE_KEY: Optional[str] = os.getenv("COINBASE_COMMERCE_API_KEY")
-
 DB = "ecliptica.db"
 
-QUESTS: Final[list[tuple[str, str]]] = [
+QUESTS = [
     ("experience", "Your perps experience? (0‑3m / 3‑12m / >12m)"),
     ("capital", "Capital allocated (USD)"),
     ("risk", "Max loss % (e.g. 2)"),
@@ -58,10 +49,9 @@ QUESTS: Final[list[tuple[str, str]]] = [
     ("leverage", "Leverage multiple (1 if none)"),
     ("funding", "Comfort paying funding 8h? (yes / unsure / prefer spot)"),
 ]
-
 SETUP, = range(1)
 
-# ───────────────────────────── db helpers ────────────────────────────────── #
+# ───────────────────────────── DB helpers ───────────────────────────────── #
 
 def init_db() -> None:
     with sqlite3.connect(DB) as con:
@@ -76,34 +66,44 @@ def save_profile(uid: int, data: dict[str, str]) -> None:
 
 def load_profile(uid: int) -> dict[str, str]:
     with sqlite3.connect(DB) as con:
-        cur = con.cursor()
-        cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
+        cur = con.cursor(); cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
         row = cur.fetchone()
     return json.loads(row[0]) if row else {}
 
 
 def sub_active(uid: int) -> bool:
     with sqlite3.connect(DB) as con:
-        cur = con.cursor()
-        cur.execute("SELECT exp FROM sub WHERE uid=?", (uid,))
+        cur = con.cursor(); cur.execute("SELECT exp FROM sub WHERE uid=?", (uid,))
         row = cur.fetchone()
     return bool(row) and datetime.fromisoformat(row[0]) > datetime.now(timezone.utc)
 
-# ───────────────────────────── rei helper ────────────────────────────────── #
+# ───────────────────────────── REI helper ───────────────────────────────── #
 
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
+    template = (
+        "You are a crypto‑perps signal generator. Reply using THIS 8‑line card and nothing else:\n"
+        "LINE1: emoji direction (🟢 LONG / 🔴 SHORT / 🟡 WAIT) ASSET – confidence %\n"
+        "LINE2: ≤15‑word context sentence\n"
+        "LINE3: (blank)\n"
+        "LINE4: Short plan — Entry $… • SL $… • TP $… (R:R)\n"
+        "LINE5: Swing plan — Entry $… • SL $… • TP $… (R:R) or leave blank\n"
+        "LINE6: (keep blank if no second plan)\n"
+        "LINE7: Risk tips (start with –)\n"
+        "LINE8: 📄 Details (leave literal)"
+    )
+
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
-    messages = []
+    msgs = [{"role": "system", "content": template}]
     if profile:
-        profile_txt = "\n".join(f"{k}: {v}" for k, v in profile.items())
-        messages.append({"role": "user", "content": f"Trader profile:\n{profile_txt}"})
-    messages.append({"role": "user", "content": prompt})
-    body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": messages}
+        msgs.append({"role": "user", "content": "Trader profile:\n" + "\n".join(f"{k}: {v}" for k, v in profile.items())})
+    msgs.append({"role": "user", "content": prompt})
+
+    body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": msgs}
     r = requests.post("https://api.reisearch.box/v1/chat/completions", headers=headers, json=body, timeout=60)
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"].strip()
 
-# ───────────────────────────── telegram callbacks ────────────────────────── #
+# ───────────────────────────── Telegram handlers ────────────────────────── #
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to *Ecliptica Perps Assistant*!\nUse /setup then /ask <question>.",
@@ -111,31 +111,27 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("/setup – profile wizard\n/ask BTC outlook? – personalised answer\n/faq – quick perps primer")
+    await update.message.reply_text("/setup – profile wizard\n/ask BTC outlook? – personalised answer\n/faq – perps primer")
 
 async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        textwrap.dedent(
-            """*Perps 101*\n• Funding every 8 h\n• Mark price avoids wicks\n• Keep margin buffer"""
-        ),
+        textwrap.dedent("""*Perps 101*\n• Funding every 8 h\n• Mark price avoids wicks\n• Keep margin buffer"""),
         parse_mode=ParseMode.MARKDOWN,
     )
 
-# ---------- setup wizard ---------- #
+# ---------- Setup wizard ---------- #
 async def setup_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["idx"] = 0
-    ctx.user_data["ans"] = {}
+    ctx.user_data["idx"] = 0; ctx.user_data["ans"] = {}
     await update.message.reply_text("Let's set up your profile – /cancel anytime.")
     return await ask_next(update, ctx)
 
 async def ask_next(update_or_q, ctx):
-    idx = ctx.user_data["idx"]
-    if idx >= len(QUESTS):
+    i = ctx.user_data["idx"]
+    if i >= len(QUESTS):
         save_profile(update_or_q.effective_user.id, ctx.user_data["ans"])
         await update_or_q.message.reply_text("✅ Saved! Now /ask your first question.")
         return ConversationHandler.END
-    key, q = QUESTS[idx]
-    await update_or_q.message.reply_text(f"[{idx+1}/{len(QUESTS)}] {q}")
+    await update_or_q.message.reply_text(f"[{i+1}/{len(QUESTS)}] {QUESTS[i][1]}")
     return SETUP
 
 async def collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -151,20 +147,24 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not sub_active(update.effective_user.id):
         await update.message.reply_text("Subscription not active – free mode.")
-    q = " ".join(ctx.args) or "Give me a market outlook."
-    await update.message.reply_text("Thinking…")
-    prof = load_profile(update.effective_user.id)
-    try:
-        ans = await asyncio.get_running_loop().run_in_executor(
-            None, functools.partial(rei_call, q, prof)
-        )
-    except Exception as e:
-        logging.exception("REI error")
-        await update.message.reply_text("⚠️ REI CORE did not respond – check API key or try later.")
-        return
-    await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
 
-# ───────────────────────────── main ─────────────────────────────────────── #
+    question = " ".join(ctx.args) or "Give me a market outlook."
+    await update.message.reply_text("Thinking…")
+    profile = load_profile(update.effective_user.id)
+
+    try:
+        card = await asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(rei_call, question, profile)
+        )
+    except Exception:
+        logging.exception("REI error")
+        await update.message.reply_text("⚠️ REI CORE did not respond – try later.")
+        return
+
+    concise = card.split("📄", 1)[0].strip()
+    await update.message.reply_text(concise, parse_mode=ParseMode.MARKDOWN)
+
+# ───────────────────────────── Entrypoint ───────────────────────────────── #
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -182,10 +182,4 @@ def main():
         states={SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]},
         fallbacks=[CommandHandler("cancel", cancel)],
     )
-    app.add_handler(wizard)
-
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+    app.add
