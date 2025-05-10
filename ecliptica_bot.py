@@ -90,7 +90,7 @@ def rei_call(prompt: str, profile: dict[str, str]) -> str:
     # system prompt enforces concise 8-line card
     asset = prompt.split()[0].upper()
     template = f"""
-You are a crypto-perps signal generator. Reply using THIS EXACT 8-line card and nothing else:
+You are a crypto-perps signal generator. Ignore any prior conversation history not explicitly provided in this request. Reply using THIS EXACT 8-line card and nothing else:
 LINE1: emoji direction (🟢 LONG / 🔴 SHORT / 🟡 WAIT) {asset} – confidence %
 LINE2: ≤15-word context sentence
 LINE3: (blank)
@@ -100,7 +100,10 @@ LINE6: (blank or second plan)
 LINE7: Risk tips (start with –)
 LINE8: 📄 Details (leave literal)
 
-IMPORTANT: Use the provided Trader profile above to tailor your recommendations; do not ask for additional profile details.
+IMPORTANT: Use the provided Trader profile below to tailor your recommendations; do not ask for additional profile details.
+
+If the user asks any question outside the scope of trade setups, technical entries, exits, or risk management, respond exactly with:
+"🔒 I'm focused solely on providing actionable crypto perpetuals trading signals. Please ask a trade-related question."
 """
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
     msgs = [{"role": "system", "content": template}]
@@ -115,7 +118,7 @@ IMPORTANT: Use the provided Trader profile above to tailor your recommendations;
         "https://api.reisearch.box/v1/chat/completions",
         headers=headers,
         json=body,
-        timeout=60,
+        timeout=90,
     )
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"].strip()
@@ -192,6 +195,30 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     parts = full_card.split("📄", 1)
     concise = parts[0].strip()
+    # ensure emoji direction prefix on first line
+    lines = concise.splitlines()
+    if lines:
+        first = lines[0]
+        if not first.startswith(("🟢", "🔴", "🟡")):
+            direction = "🟡"
+            if "long" in first.lower():
+                direction = "🟢"
+            elif "short" in first.lower():
+                direction = "🔴"
+            lines[0] = f"{direction} {first}"
+        concise = "
+".join(lines)
+    if lines:
+        first = lines[0]
+        if not first.startswith(("🟢","🔴","🟡")):
+            direction = "🟡"
+            if "long" in first.lower():
+                direction = "🟢"
+            elif "short" in first.lower():
+                direction = "🔴"
+            lines[0] = f"{direction} {first}"
+        concise = "
+".join(lines)(lines)
     await update.message.reply_text(concise, parse_mode=ParseMode.MARKDOWN)
 
     if len(parts) > 1 and parts[1].strip():
@@ -236,3 +263,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
