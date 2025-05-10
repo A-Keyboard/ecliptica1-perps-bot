@@ -149,4 +149,11 @@ def main()->None:
     wizard=ConversationHandler(entry_points=[CommandHandler("setup",setup_start)],states={SETUP:[MessageHandler(filters.TEXT&~filters.COMMAND,collect)]},fallbacks=[CommandHandler("cancel",cancel)])
     app.add_handler(wizard)
     app.run_polling()
-if __name__=="__main__": main()
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        # Print traceback so logs capture startup errors
+        import traceback
+        traceback.print_exc()
+        raise
