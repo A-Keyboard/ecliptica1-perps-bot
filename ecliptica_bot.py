@@ -161,16 +161,11 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 # /ask handler
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not sub_active(update.effective_user.id):
-        await update.message.reply_text("Subscription not active – free mode.")
+
     query = " ".join(ctx.args) or "Give me a market outlook."
-    await update.message.reply_text("Thinking…")
+    await update.message.reply_text("🧠 Analyzing market trends…")
     profile = load_profile(update.effective_user.id)
-    if not profile:
-        await update.message.reply_text(
-            "⚠️ I don't have your profile yet. Please run /setup to provide your trading parameters."
-        )
-        return
+
     try:
         answer = await asyncio.get_running_loop().run_in_executor(
             None,
