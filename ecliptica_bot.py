@@ -1,11 +1,11 @@
-# ecliptica_bot.py — v0.6.3 (concise signal‑card format, syntax fix v2)
+# ecliptica_bot.py — v0.6.3 (fixed newline join, removed duplicate block)
 """Ecliptica Perps Assistant — minimal Telegram trading bot with concise card output
 
 Changes in v0.6.3
 ──────────────────
-• `/ask` wraps REI call with a system‑prompt enforcing the 8‑line signal‑card template.
+• `/ask` wraps REI call with a system-prompt enforcing the 8-line signal-card template.
 • Bot trims everything after the “📄 Details” marker for concise display and sends secondary thought separately.
-• Syntax fix: corrected string literal for secondary thought.
+• Syntax fix: corrected newline join for concise card and removed duplicated emoji-prefix logic.
 
 Dependencies
     python-telegram-bot==20.7
@@ -23,7 +23,7 @@ import os
 import sqlite3
 import textwrap
 from datetime import datetime, timezone
-from typing import Final, Optional
+from typing import Final
 
 import requests
 from dotenv import load_dotenv
@@ -206,19 +206,8 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             elif "short" in first.lower():
                 direction = "🔴"
             lines[0] = f"{direction} {first}"
-        concise = "
-".join(lines)
-    if lines:
-        first = lines[0]
-        if not first.startswith(("🟢","🔴","🟡")):
-            direction = "🟡"
-            if "long" in first.lower():
-                direction = "🟢"
-            elif "short" in first.lower():
-                direction = "🔴"
-            lines[0] = f"{direction} {first}"
-        concise = "
-".join(lines)(lines)
+        concise = "\n".join(lines)
+
     await update.message.reply_text(concise, parse_mode=ParseMode.MARKDOWN)
 
     if len(parts) > 1 and parts[1].strip():
@@ -263,4 +252,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
