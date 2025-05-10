@@ -28,8 +28,8 @@ from telegram.ext import (
 
 load_dotenv()
 
-BOT_TOKEN: Final[str] = os.environ["TELEGRAM_BOT_TOKEN"]
-REI_KEY: Final[str] = os.environ["REICORE_API_KEY"]
+BOT_TOKEN: Final[str] = os.environ["TELEGRAM_BOT_TOKEN"].strip()  # strip whitespace/hidden chars
+REI_KEY: Final[str] = os.environ["REICORE_API_KEY"].strip()  # strip whitespace/hidden chars
 DB = "ecliptica.db"
 QUESTS: Final[list[tuple[str,str]]] = [
     ("experience","Your perps experience? (0-3m / 3-12m / >12m)"),
