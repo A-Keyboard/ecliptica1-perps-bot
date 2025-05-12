@@ -170,7 +170,25 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Status update
-    await update.message.reply_text("🧠 Analyzing market trends…")")
+    await update.message.reply_text("🧠 Analyzing market trends…")
+
+    # Gather query and profile
+    query = " ".join(ctx.args) or "Give me a market outlook."
+    profile = prof
+
+    try:
+        answer = await asyncio.get_running_loop().run_in_executor(
+            None,
+            functools.partial(rei_call, query, profile),
+        )
+    except Exception:
+        logging.exception("REI error")
+        await update.message.reply_text("⚠️ REI CORE did not respond – try later.")
+        return
+
+    # Send the AI's answer
+    await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
+)
     profile = load_profile(update.effective_user.id)
 
     try:
