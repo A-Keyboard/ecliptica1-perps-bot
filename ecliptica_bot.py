@@ -23,7 +23,7 @@ import requests
 import asyncio
 import functools
 from datetime import datetime, timezone
-from typing import Final, Optional
+from typing import Final
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ParseMode
@@ -57,12 +57,8 @@ SETUP, = range(1)
 
 def init_db() -> None:
     with sqlite3.connect(DB) as con:
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)"
-        )
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS sub (uid INTEGER PRIMARY KEY, exp TEXT)"
-        )
+        con.execute("CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)")
+        con.execute("CREATE TABLE IF NOT EXISTS sub (uid INTEGER PRIMARY KEY, exp TEXT)")
 
 
 def save_profile(uid: int, data: dict[str, str]) -> None:
@@ -174,12 +170,11 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Gather query and profile
     query = " ".join(ctx.args) or "Give me a market outlook."
-    profile = prof
 
     try:
         answer = await asyncio.get_running_loop().run_in_executor(
             None,
-            functools.partial(rei_call, query, profile),
+            functools.partial(rei_call, query, prof),
         )
     except Exception:
         logging.exception("REI error")
@@ -187,19 +182,6 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Send the AI's answer
-    await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
-)
-    profile = load_profile(update.effective_user.id)
-
-    try:
-        answer = await asyncio.get_running_loop().run_in_executor(
-            None,
-            functools.partial(rei_call, query, profile),
-        )
-    except Exception:
-        logging.exception("REI error")
-        await update.message.reply_text("⚠️ REI CORE did not respond – try later.")
-        return
     await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
 
 # ───────────────────────────── Entrypoint ───────────────────────────────── #
