@@ -161,9 +161,16 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 # /ask handler
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    # Ensure user has setup profile
+    prof = load_profile(update.effective_user.id)
+    if not prof:
+        await update.message.reply_text(
+            "⚠️ Please run /setup to provide your trading profile before asking for signals."
+        )
+        return
 
-    query = " ".join(ctx.args) or "Give me a market outlook."
-    await update.message.reply_text("🧠 Analyzing market trends…")
+    # Status update
+    await update.message.reply_text("🧠 Analyzing market trends…")")
     profile = load_profile(update.effective_user.id)
 
     try:
