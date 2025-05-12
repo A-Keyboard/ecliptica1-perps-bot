@@ -1,10 +1,10 @@
-# ecliptica_bot.py — v0.6.5
+# ecliptica_bot.py — v0.6.6
 """
-Ecliptica Perps Assistant — minimal Telegram trading bot with 300 s timeout
+Ecliptica Perps Assistant — minimal Telegram trading bot with 300 s (5 min) timeout
 
-v0.6.5
+v0.6.6
 ──────
-• Increased REI API timeout to 300 s.
+• Increased REI API timeout to 300 s (5 min).
 • Full REI response returned (no concise split).
 
 Dependencies
