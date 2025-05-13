@@ -183,4 +183,26 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
 
-# Entrypoint omitted for brevity...
+# ───────────────────────────── Entrypoint ────────────────────────────── #
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    init_db()
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("faq", faq_cmd))
+    app.add_handler(CommandHandler("ask", ask_cmd))
+    # Setup wizard handlers
+    wizard = ConversationHandler(
+        entry_points=[CommandHandler("setup", setup_start)],
+        states={SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]},
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(wizard)
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
