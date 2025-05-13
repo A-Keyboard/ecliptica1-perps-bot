@@ -170,13 +170,11 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = " ".join(ctx.args) or "Give me a market outlook."
 
     try:
-            # serialize REI calls across users
-            async with token_lock:
-                answer = await asyncio.get_running_loop().run_in_executor(
-                    None, functools.partial(rei_call, query, prof)
-                )
-            None, functools.partial(rei_call, query, prof)
-        )
+        # Serialize REI calls across users
+        async with token_lock:
+            answer = await asyncio.get_running_loop().run_in_executor(
+                None, functools.partial(rei_call, query, prof)
+            )
     except Exception:
         logging.exception("REI error")
         await update.message.reply_text("⚠️ REI CORE did not respond – try later.")
