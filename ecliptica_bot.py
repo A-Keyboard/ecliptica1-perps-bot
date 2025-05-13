@@ -7,6 +7,7 @@ v0.6.7
 • Ensured proper newline handling in REI request payload
 • Retry on 5xx errors, log latency
 • Timeout set to 300 s (5 min)
+• Fixed missing setup handlers
 
 Dependencies
     python-telegram-bot==20.7
@@ -28,8 +29,7 @@ from datetime import datetime, timezone
 from typing import Final
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.constants import ChatAction
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -50,12 +50,12 @@ REI_KEY: Final[str] = os.environ["REICORE_API_KEY"].strip()
 DB = "ecliptica.db"
 QUESTS: Final[list[tuple[str, str]]] = [
     ("experience", "Your perps experience? (0-3m / 3-12m / >12m)"),
-    ("capital", "Capital allocated (USD)"),
-    ("risk", "Max loss % (e.g. 2)"),
-    ("quote", "Quote currency (USDT / USD-C / BTC)"),
-    ("timeframe", "Timeframe (scalp / intraday / swing / position)"),
-    ("leverage", "Leverage multiple (1 if none)"),
-    ("funding", "Comfort paying funding 8h? (yes / unsure / prefer spot)"),
+    ("capital",    "Capital allocated (USD)"),
+    ("risk",       "Max loss % (e.g. 2)"),
+    ("quote",      "Quote currency (USDT / USD-C / BTC)"),
+    ("timeframe",  "Timeframe (scalp / intraday / swing / position)"),
+    ("leverage",   "Leverage multiple (1 if none)"),
+    ("funding",    "Comfort paying funding 8h? (yes / unsure / prefer spot)"),
 ]
 SETUP, = range(1)
 
@@ -79,32 +79,15 @@ def load_profile(uid: int) -> dict[str, str]:
         row = cur.fetchone()
     return json.loads(row[0]) if row else {}
 
-
-def sub_active(uid: int) -> bool:
-    with sqlite3.connect(DB) as con:
-        cur = con.cursor()
-        cur.execute("SELECT exp FROM sub WHERE uid=?", (uid,))
-        row = cur.fetchone()
-    return bool(row) and datetime.fromisoformat(row[0]) > datetime.now(timezone.utc)
-
 # ───────────────────────────── REI API Call ───────────────────────────────── #
 
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
-    """Call REI CORE with retry on 5xx errors and log latency."""
-    headers = {
-        "Authorization": f"Bearer {REI_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
     messages = []
     if profile:
-        # Proper newline escape
         profile_txt = "\n".join(f"{k}: {v}" for k, v in profile.items())
-        messages.append({
-            "role": "user",
-            "content": f"Trader profile:\n{profile_txt}",
-        })
+        messages.append({"role": "user", "content": f"Trader profile:\n{profile_txt}"})
     messages.append({"role": "user", "content": prompt})
-
     body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": messages}
 
     # Retry logic: 2 attempts on server errors
@@ -153,9 +136,35 @@ async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.MARKDOWN,
     )
 
-# Setup wizard handlers omitted for brevity...
+# ───────────────────────────── Setup Wizard ────────────────────────────── #
+async def setup_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    ctx.user_data['i'] = 0
+    ctx.user_data['ans'] = {}
+    await update.message.reply_text("Let's set up your profile – /cancel anytime.")
+    return await ask_next(update, ctx)
 
-# /ask handler
+async def ask_next(update_or_q, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    idx = ctx.user_data['i']
+    if idx >= len(QUESTS):
+        save_profile(update_or_q.effective_user.id, ctx.user_data['ans'])
+        await update_or_q.message.reply_text("✅ Saved! Now /ask your first question.")
+        return ConversationHandler.END
+    _, question = QUESTS[idx]
+    await update_or_q.message.reply_text(f"[{idx+1}/{len(QUESTS)}] {question}")
+    return SETUP
+
+async def collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    i = ctx.user_data['i']
+    key, _ = QUESTS[i]
+    ctx.user_data['ans'][key] = update.message.text.strip()
+    ctx.user_data['i'] = i + 1
+    return await ask_next(update, ctx)
+
+async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+# ───────────────────────────── /ask Handler ────────────────────────────── #
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     prof = load_profile(update.effective_user.id)
     if not prof:
@@ -164,14 +173,12 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Show typing
+    # Indicate typing
     await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-
     await update.message.reply_text("🧠 Analyzing market trends…")
     query = " ".join(ctx.args) or "Give me a market outlook."
 
     try:
-        # Serialize REI calls across users
         async with token_lock:
             answer = await asyncio.get_running_loop().run_in_executor(
                 None, functools.partial(rei_call, query, prof)
@@ -185,23 +192,21 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ───────────────────────────── Entrypoint ────────────────────────────── #
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     init_db()
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("faq", faq_cmd))
     app.add_handler(CommandHandler("ask", ask_cmd))
-    # Setup wizard handlers
+
     wizard = ConversationHandler(
         entry_points=[CommandHandler("setup", setup_start)],
         states={SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]},
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     app.add_handler(wizard)
+
     app.run_polling()
 
 if __name__ == "__main__":
