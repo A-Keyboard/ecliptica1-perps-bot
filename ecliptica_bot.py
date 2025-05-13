@@ -27,7 +27,8 @@ import time
 from datetime import datetime, timezone
 from typing import Final
 from dotenv import load_dotenv
-from telegram import Update, ChatAction
+from telegram import Update
+from telegram.constants import ChatAction
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
