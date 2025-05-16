@@ -210,38 +210,50 @@ async def asset_choice_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         [InlineKeyboardButton("Long", callback_data="type:long"),
          InlineKeyboardButton("Short", callback_data="type:short")]
     ])
-    await update.message.reply_text(f"Asset: {text}\nChoose direction:", reply_markup=kb)
+    await update.message.reply_text(f"Asset: {text}
+Choose direction:", reply_markup=kb)
     return TRADE_TYPE
 
-async def type_choice(query: Update.CallbackQuery, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    data = query.data.split(':')[1]
-    ctx.user_data['type'] = data
+# handle callback query for direction
+async def type_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
     await query.answer()
+    choice = query.data.split(':')[1]
+    ctx.user_data['type'] = choice
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Concise", callback_data="len:concise"),
          InlineKeyboardButton("Detailed", callback_data="len:detailed")]
     ])
-    await query.edit_message_text(f"Direction: {data.upper()}\nSelect length:", reply_markup=kb)
+    await query.edit_message_text(f"Direction: {choice.upper()}
+Select length:", reply_markup=kb)
     return TRADE_LEN
 
-async def len_choice(query: Update.CallbackQuery, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    length = query.data.split(':')[1]
-    asset = ctx.user_data['asset']
-    trade_type = ctx.user_data['type']
-    prof = load_profile(query.from_user.id)
-    profile_txt = "\n".join(f"{k}: {v}" for k, v in prof.items())
-    prompt = (f"Trader profile:\n{profile_txt}\n"
-              f"Signal: {trade_type.upper()} {asset}. Format: ENTRY; STOP; TP; R:R. Length: {length}.")
+# handle callback query for length and generate signal
+async def len_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
     await query.answer()
+    length = query.data.split(':')[1]
+    asset = ctx.user_data.get('asset')
+    trade_type = ctx.user_data.get('type')
+    prof = load_profile(query.from_user.id)
+    profile_txt = "
+".join(f"{k}: {v}" for k, v in prof.items())
+    prompt = (
+        f"Trader profile:
+{profile_txt}
+"
+        f"Signal: {trade_type.upper()} {asset}. Format: ENTRY; STOP; TP; R:R. Length: {length}."
+    )
     await query.edit_message_text("🧠 Generating…")
     loop = asyncio.get_running_loop()
     async with token_lock:
         res = await loop.run_in_executor(None, functools.partial(rei_call, prompt, prof))
     prefix = "🟢 LONG" if trade_type == "long" else "🔴 SHORT"
-    await query.message.reply_text(f"{prefix} {asset}\n{res}", parse_mode=ParseMode.MARKDOWN)
+    await query.message.reply_text(f"{prefix} {asset}
+{res}", parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
-# Ad-hoc /ask
+# Ad-hoc /ask /ask
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     prof = load_profile(update.effective_user.id)
     if not prof:
