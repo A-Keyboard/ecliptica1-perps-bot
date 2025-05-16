@@ -91,7 +91,7 @@ TRADE_ASSET, TRADE_TYPE, TRADE_DIFF = 1, 2, 3
 
 # ───────────────────────────── Database Helpers ───────────────────────────── #
 def init_db() -> None:
-    with sqlite3.connect(DB) as con:
+    with sqlite3.connect(DB)
         con.execute("CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)")
 
 def save_profile(uid: int, data: dict[str, str]) -> None:
@@ -101,5 +101,5 @@ def save_profile(uid: int, data: dict[str, str]) -> None:
         con.execute("REPLACE INTO profile VALUES(?,?)", (uid, json.dumps(data))) as con:
         con.execute("REPLACE INTO profile VALUES(?,?)",(uid,json.dumps(data)))
 
-...")
+
 }]}
