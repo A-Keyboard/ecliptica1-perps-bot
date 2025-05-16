@@ -1,13 +1,13 @@
-# ecliptica_bot.py — v0.6.8
+# ecliptica_bot.py — v0.6.9
 """
 Ecliptica Perps Assistant — Telegram trading bot with guided /trade flow and formatted AI responses
 
-v0.6.8
+v0.6.9
 ──────
-• Added structured /trade wizard: select asset, direction, response length options
-• Prompt enforces formatted trade output from REI
-• Unstructured /ask remains for advanced queries
-• 300 s timeout, retry logic, serialized REI calls
+• Auto-load perpetual symbols from Binance public API (no API key needed)
+• Paginated inline keyboard (4 cols) for asset selection
+• Acknowledge callback queries with query.answer()
+• Retry-safe token lock for serialized REI calls
 
 Dependencies:
     python-telegram-bot==20.7
@@ -18,7 +18,7 @@ from __future__ import annotations
 import os, json, sqlite3, logging, textwrap, time, functools, asyncio
 import requests
 from datetime import datetime, timezone
-from typing import Final
+from typing import Final, List
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.constants import ChatAction, ParseMode
@@ -36,8 +36,8 @@ BOT_TOKEN: Final[str] = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 REI_KEY:   Final[str] = os.environ.get("REICORE_API_KEY", "").strip()
 DB = "ecliptica.db"
 
-# Asset universe will be initialized at startup
-ASSETS: list[str] = []
+# Global list of assets
+ASSETS: List[str] = []
 
 # Profile questions
 QUESTS: Final[list[tuple[str, str]]] = [
@@ -69,23 +69,32 @@ def save_profile(uid: int, data: dict[str, str]) -> None:
 def load_profile(uid: int) -> dict[str, str]:
     with sqlite3.connect(DB) as con:
         cur = con.cursor()
-        cur.execute(
-            "SELECT data FROM profile WHERE uid=?",
-            (uid,)
-        )
+        cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
         row = cur.fetchone()
     return json.loads(row[0]) if row else {}
 
-# ───────────────────────────── REI API Call ───────────────────────────────── # ───────────────────────────────── #
+# ───────────────────────────── ASSETS Loader ───────────────────────────────── #
+def init_assets() -> None:
+    global ASSETS
+    try:
+        resp = requests.get(
+            "https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10
+        )
+        resp.raise_for_status()
+        symbols = [s["symbol"] for s in resp.json().get("symbols", []) if s.get("contractType") == "PERPETUAL"]
+        ASSETS = sorted(set(symbols))
+        logging.info(f"Loaded {len(ASSETS)} assets from Binance Futures")
+    except Exception:
+        logging.exception("Failed to load assets, using empty list")
+        ASSETS = []
+
+# ───────────────────────────── REI API Call ───────────────────────────────── #
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
     messages = []
     if profile:
         p_txt = "\n".join(f"{k}: {v}" for k, v in profile.items())
-        messages.append({
-            "role": "user",
-            "content": f"Trader profile:\n{p_txt}"
-        })
+        messages.append({"role": "user", "content": f"Trader profile:\n{p_txt}"})
     messages.append({"role": "user", "content": prompt})
     body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": messages}
 
@@ -106,9 +115,7 @@ def rei_call(prompt: str, profile: dict[str, str]) -> str:
             code = e.response.status_code if e.response else None
             if code and 500 <= code < 600 and attempt < 2:
                 backoff = 2 ** attempt
-                logging.warning(
-                    f"REI HTTPError {code}, retrying in {backoff}s"
-                )
+                logging.warning(f"REI HTTPError {code}, retrying in {backoff}s")
                 time.sleep(backoff)
                 continue
             raise
@@ -152,9 +159,7 @@ async def collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data['i'] += 1
     if ctx.user_data['i'] < len(QUESTS):
         _, q = QUESTS[ctx.user_data['i']]
-        await update.message.reply_text(
-            f"[{ctx.user_data['i']+1}/{len(QUESTS)}] {q}"
-        )
+        await update.message.reply_text(f"[{ctx.user_data['i']+1}/{len(QUESTS)}] {q}")
         return SETUP
     save_profile(update.effective_user.id, ctx.user_data['ans'])
     await update.message.reply_text("✅ Profile saved! Now /trade to get a signal.")
@@ -170,20 +175,22 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if not prof:
         await update.message.reply_text("⚠️ Please run /setup first.")
         return ConversationHandler.END
-    # Use pre-initialized ASSETS list
-    keyboard = []
-    for symbol in ASSETS:
-        keyboard.append([InlineKeyboardButton(symbol, callback_data=f"asset:{symbol}")])
+    if not ASSETS:
+        init_assets()
+    buttons = [InlineKeyboardButton(sym, callback_data=f"asset:{sym}") for sym in ASSETS]
+    # chunk into rows of 4
+    keyboard = [buttons[i:i+4] for i in range(0, len(buttons), 4)]
     await update.message.reply_text("Select asset:", reply_markup=InlineKeyboardMarkup(keyboard))
     return TRADE_ASSET
 
 async def asset_choice(query: CallbackQuery, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await query.answer()
     asset = query.data.split(':', 1)[1]
     ctx.user_data['trade_asset'] = asset
     kb = [[
         InlineKeyboardButton("Long", callback_data="type:long"),
         InlineKeyboardButton("Short", callback_data="type:short")
-    ]]
+    ]]        
     await query.edit_message_text(
         f"Asset: {asset}\nChoose direction:",
         reply_markup=InlineKeyboardMarkup(kb)
@@ -191,6 +198,7 @@ async def asset_choice(query: CallbackQuery, ctx: ContextTypes.DEFAULT_TYPE) -> 
     return TRADE_TYPE
 
 async def type_choice(query: CallbackQuery, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await query.answer()
     trade_type = query.data.split(':', 1)[1]
     ctx.user_data['trade_type'] = trade_type
     kb = [[
@@ -204,6 +212,7 @@ async def type_choice(query: CallbackQuery, ctx: ContextTypes.DEFAULT_TYPE) -> i
     return TRADE_LEN
 
 async def len_choice(query: CallbackQuery, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await query.answer()
     length = query.data.split(':', 1)[1]
     asset = ctx.user_data['trade_asset']
     trade_type = ctx.user_data['trade_type']
@@ -240,11 +249,10 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     init_db()
-    # optionally await init_assets() here if dynamic
+    init_assets()
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(False).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    # setup wizard
     app.add_handler(
         ConversationHandler(
             entry_points=[CommandHandler("setup", setup_start)],
@@ -252,7 +260,6 @@ def main() -> None:
             fallbacks=[CommandHandler("cancel", cancel)]
         )
     )
-    # trade wizard
     app.add_handler(
         ConversationHandler(
             entry_points=[CommandHandler("trade", trade_start)],
@@ -269,4 +276,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
