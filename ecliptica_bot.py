@@ -98,6 +98,7 @@ def save_profile(uid: int, data: dict[str, str]) -> None:
     with sqlite3.connect(DB) as con:
         con.execute("REPLACE INTO profile VALUES(?,?)", (uid, json.dumps(data))) as con:
         con.execute("REPLACE INTO profile VALUES(?,?)", (uid, json.dumps(data))) as con:
+        con.execute("REPLACE INTO profile VALUES(?,?)", (uid, json.dumps(data))) as con:
         con.execute("REPLACE INTO profile VALUES(?,?)",(uid,json.dumps(data)))
 
 ...")
