@@ -175,7 +175,6 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     if not ASSETS:
         init_assets()
-    # show top-20 + manual entry + suggestion request
     top20 = ASSETS[:20]
     rows = [top20[i:i+4] for i in range(0, len(top20), 4)]
     kb = ReplyKeyboardMarkup(
@@ -205,16 +204,13 @@ async def asset_choice_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         await update.message.reply_text("Invalid symbol. Try again.")
         return TRADE_ASSET
     ctx.user_data['asset'] = text
-    # direction selection
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Long", callback_data="type:long"),
          InlineKeyboardButton("Short", callback_data="type:short")]
     ])
-    await update.message.reply_text(f"Asset: {text}
-Choose direction:", reply_markup=kb)
+    await update.message.reply_text(f"Asset: {text}\nChoose direction:", reply_markup=kb)
     return TRADE_TYPE
 
-# handle callback query for direction
 async def type_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -224,11 +220,9 @@ async def type_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("Concise", callback_data="len:concise"),
          InlineKeyboardButton("Detailed", callback_data="len:detailed")]
     ])
-    await query.edit_message_text(f"Direction: {choice.upper()}
-Select length:", reply_markup=kb)
+    await query.edit_message_text(f"Direction: {choice.upper()}\nSelect length:", reply_markup=kb)
     return TRADE_LEN
 
-# handle callback query for length and generate signal
 async def len_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -236,12 +230,9 @@ async def len_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     asset = ctx.user_data.get('asset')
     trade_type = ctx.user_data.get('type')
     prof = load_profile(query.from_user.id)
-    profile_txt = "
-".join(f"{k}: {v}" for k, v in prof.items())
+    profile_txt = "\n".join(f"{k}: {v}" for k, v in prof.items())
     prompt = (
-        f"Trader profile:
-{profile_txt}
-"
+        f"Trader profile:\n{profile_txt}\n"
         f"Signal: {trade_type.upper()} {asset}. Format: ENTRY; STOP; TP; R:R. Length: {length}."
     )
     await query.edit_message_text("🧠 Generating…")
@@ -249,11 +240,9 @@ async def len_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     async with token_lock:
         res = await loop.run_in_executor(None, functools.partial(rei_call, prompt, prof))
     prefix = "🟢 LONG" if trade_type == "long" else "🔴 SHORT"
-    await query.message.reply_text(f"{prefix} {asset}
-{res}", parse_mode=ParseMode.MARKDOWN)
+    await query.message.reply_text(f"{prefix} {asset}\n{res}", parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
-# Ad-hoc /ask /ask
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     prof = load_profile(update.effective_user.id)
     if not prof:
@@ -267,7 +256,6 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ans = await loop.run_in_executor(None, functools.partial(rei_call, q, prof))
     await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
 
-# Main
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     init_env()
