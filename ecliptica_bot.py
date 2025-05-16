@@ -59,14 +59,14 @@ def init_db() -> None:
             "CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)"
         )
 
- def save_profile(uid: int, data: dict[str, str]) -> None:
+def save_profile(uid: int, data: dict[str, str]) -> None:
     with sqlite3.connect(DB) as con:
         con.execute(
             "REPLACE INTO profile (uid, data) VALUES (?,?)",
             (uid, json.dumps(data)),
         )
 
- def load_profile(uid: int) -> dict[str, str]:
+def load_profile(uid: int) -> dict[str, str]:
     with sqlite3.connect(DB) as con:
         cur = con.cursor()
         cur.execute(
@@ -76,7 +76,7 @@ def init_db() -> None:
         row = cur.fetchone()
     return json.loads(row[0]) if row else {}
 
-# ───────────────────────────── REI API Call ───────────────────────────────── #
+# ───────────────────────────── REI API Call ───────────────────────────────── # ───────────────────────────────── #
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
     messages = []
@@ -269,3 +269,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
