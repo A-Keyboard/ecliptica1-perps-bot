@@ -1,9 +1,10 @@
-# ecliptica_bot.py — v0.6.11
+# ecliptica_bot.py — v0.6.12
 """
-Ecliptica Perps Assistant — Telegram trading bot with guided /trade flow and formatted AI responses
+Ecliptica Perps Assistant — Telegram trading bot with guided /trade flow, suggestions, and formatted AI responses
 
-v0.6.11
+v0.6.12
 ──────
+• Added “Suggest signal” option for AI-driven trade recommendations
 • Fixed indentation errors
 • Ensured /trade always shows keyboard
 • Added fallback handling for manual symbol entry
@@ -100,7 +101,6 @@ QUESTS: Final[list[tuple[str, str]]] = [
 SETUP, TRADE_ASSET, TRADE_TYPE, TRADE_LEN = range(4)
 
 # REI API call
-
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
     headers = {
         "Authorization": f"Bearer {REI_KEY}",
@@ -134,7 +134,7 @@ def rei_call(prompt: str, profile: dict[str, str]) -> str:
 # Handlers
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "👋 Welcome! Use /setup to configure, /trade for signals, or /ask for ad-hoc queries.",
+        "👋 Welcome! Use /setup to configure, /trade for signals, /ask for ad-hoc queries.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -175,19 +175,29 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     if not ASSETS:
         init_assets()
-    # show top-20 + manual entry
+    # show top-20 + manual entry + suggestion request
     top20 = ASSETS[:20]
     rows = [top20[i:i+4] for i in range(0, len(top20), 4)]
     kb = ReplyKeyboardMarkup(
-        [[KeyboardButton(sym) for sym in row] for row in rows] + [[KeyboardButton("Type manually")]],
+        [[KeyboardButton(sym) for sym in row] for row in rows]
+        + [[KeyboardButton("Type manually"), KeyboardButton("Suggest signal")]],
         one_time_keyboard=True,
         resize_keyboard=True,
     )
-    await update.message.reply_text("Select asset or type symbol:", reply_markup=kb)
+    await update.message.reply_text("Select asset, type symbol, or ask suggestion:", reply_markup=kb)
     return TRADE_ASSET
 
 async def asset_choice_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip().upper()
+    if text == "SUGGEST SIGNAL":
+        prof = load_profile(update.effective_user.id)
+        prompt = "Generate one high-confidence perpetual futures trade signal for me: asset, direction, entry, stop, take-profit, R:R."
+        await update.message.reply_text("🧠 Suggesting signal…")
+        loop = asyncio.get_running_loop()
+        async with token_lock:
+            res = await loop.run_in_executor(None, functools.partial(rei_call, prompt, prof))
+        await update.message.reply_text(res, parse_mode=ParseMode.MARKDOWN)
+        return ConversationHandler.END
     if text == "TYPE MANUALLY":
         await update.message.reply_text("Enter symbol (e.g. BTCUSDT):")
         return TRADE_ASSET
@@ -246,7 +256,6 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
 
 # Main
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     init_env()
