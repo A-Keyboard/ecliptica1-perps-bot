@@ -1,54 +1,46 @@
-# ecliptica_bot.py — v0.6.7
+# ecliptica_bot.py — v0.6.8
 """
-Ecliptica Perps Assistant — minimal Telegram trading bot with 5 min timeout and retry logic
+Ecliptica Perps Assistant — Telegram trading bot with guided /trade flow and formatted AI responses
 
-v0.6.7
+v0.6.8
 ──────
-• Ensured proper newline handling in REI request payload
-• Retry on 5xx errors, log latency
-• Timeout set to 300 s (5 min)
-• Fixed missing setup handlers
+• Added structured /trade wizard: select asset, direction, difficulty
+• Prompt enforces concise trade-format output from REI
+• Unstructured /ask remains for advanced queries
+• 300 s timeout, retry logic, serialized REI calls
 
-Dependencies
+Dependencies:
     python-telegram-bot==20.7
     requests
     python-dotenv
 """
-
 from __future__ import annotations
-import json
-import logging
-import os
-import sqlite3
-import textwrap
+import os, json, sqlite3, logging, textwrap, time, functools, asyncio
 import requests
-import asyncio
-import functools
-import time
 from datetime import datetime, timezone
 from typing import Final
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+)
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
+    Application, CommandHandler, ConversationHandler,
+    CallbackQueryHandler, MessageHandler, ContextTypes, filters
 )
 
-# Ensure only one REI call at a time across all users
+# Serialize REI calls across users
 token_lock = asyncio.Lock()
 
-# Load environment variables
+# Load environment
 load_dotenv()
-BOT_TOKEN: Final[str] = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-REI_KEY: Final[str] = os.environ["REICORE_API_KEY"].strip()
-
+BOT_TOKEN: Final[str] = os.environ.get("TELEGRAM_BOT_TOKEN",""
+).strip()
+REI_KEY:   Final[str] = os.environ.get("REICORE_API_KEY",""
+).strip()
 DB = "ecliptica.db"
-QUESTS: Final[list[tuple[str, str]]] = [
+
+# Profile questions\QUESTS: Final[list[tuple[str,str]]] = [
     ("experience", "Your perps experience? (0-3m / 3-12m / >12m)"),
     ("capital",    "Capital allocated (USD)"),
     ("risk",       "Max loss % (e.g. 2)"),
@@ -57,157 +49,176 @@ QUESTS: Final[list[tuple[str, str]]] = [
     ("leverage",   "Leverage multiple (1 if none)"),
     ("funding",    "Comfort paying funding 8h? (yes / unsure / prefer spot)"),
 ]
-SETUP, = range(1)
+SETUP = 0
+TRADE_ASSET, TRADE_TYPE, TRADE_DIFF = 1, 2, 3
 
 # ───────────────────────────── Database Helpers ───────────────────────────── #
-
 def init_db() -> None:
     with sqlite3.connect(DB) as con:
         con.execute("CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)")
-        con.execute("CREATE TABLE IF NOT EXISTS sub (uid INTEGER PRIMARY KEY, exp TEXT)")
 
-
-def save_profile(uid: int, data: dict[str, str]) -> None:
+def save_profile(uid:int,data:dict[str,str]) -> None:
     with sqlite3.connect(DB) as con:
-        con.execute("REPLACE INTO profile VALUES (?,?)", (uid, json.dumps(data)))
+        con.execute("REPLACE INTO profile VALUES(?,?)",(uid,json.dumps(data)))
 
-
-def load_profile(uid: int) -> dict[str, str]:
+def load_profile(uid:int)->dict[str,str]:
     with sqlite3.connect(DB) as con:
-        cur = con.cursor()
-        cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
-        row = cur.fetchone()
+        cur=con.cursor(); cur.execute("SELECT data FROM profile WHERE uid=?",(uid,))
+        row=cur.fetchone()
     return json.loads(row[0]) if row else {}
 
 # ───────────────────────────── REI API Call ───────────────────────────────── #
-
-def rei_call(prompt: str, profile: dict[str, str]) -> str:
-    headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
-    messages = []
+def rei_call(prompt:str,profile:dict[str,str])->str:
+    headers={"Authorization":f"Bearer {REI_KEY}","Content-Type":"application/json"}
+    msgs=[]
     if profile:
-        profile_txt = "\n".join(f"{k}: {v}" for k, v in profile.items())
-        messages.append({"role": "user", "content": f"Trader profile:\n{profile_txt}"})
-    messages.append({"role": "user", "content": prompt})
-    body = {"model": "rei-core-chat-001", "temperature": 0.2, "messages": messages}
-
-    # Retry logic: 2 attempts on server errors
-    for attempt in range(2):
-        start_ts = time.time()
+        p_txt="\n".join(f"{k}: {v}" for k,v in profile.items())
+        msgs.append({"role":"user","content":f"Trader profile:\n{p_txt}"})
+    msgs.append({"role":"user","content":prompt})
+    body={"model":"rei-core-chat-001","temperature":0.2,"messages":msgs}
+    # retry on 5xx
+    for i in range(3):
+        start=time.time()
         try:
-            resp = requests.post(
+            r=requests.post(
                 "https://api.reisearch.box/v1/chat/completions",
-                headers=headers,
-                json=body,
-                timeout=300,
+                headers=headers,json=body,timeout=300
             )
-            resp.raise_for_status()
-            elapsed = time.time() - start_ts
-            logging.info(f"REI API call succeeded in {elapsed:.1f}s")
-            return resp.json()["choices"][0]["message"]["content"].strip()
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response else None
-            logging.error(f"REI API HTTPError {status} attempt {attempt+1}: {e}")
-            if status and 500 <= status < 600 and attempt == 0:
-                time.sleep(2)
+            r.raise_for_status()
+            logging.info(f"REI call success {time.time()-start:.1f}s")
+            return r.json()["choices"][0]["message"]["content"].strip()
+        except requests.HTTPError as e:
+            code=e.response.status_code if e.response else None
+            if code and 500<=code<600 and i<2:
+                backoff=2**i; time.sleep(backoff)
                 continue
             raise
-        except Exception:
-            logging.exception("REI API unexpected error on attempt %d", attempt+1)
-            raise
-    raise RuntimeError("REI API retry failed")
+    raise RuntimeError("REI retry failed")
 
 # ───────────────────────────── Telegram Handlers ────────────────────────── #
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update:Update,ctx:ContextTypes.DEFAULT_TYPE)->None:
     await update.message.reply_text(
-        "👋 Welcome to *Ecliptica Perps Assistant*!\nUse /setup then /ask <question>.",
-        parse_mode=ParseMode.MARKDOWN,
+        "👋 Welcome to *Ecliptica Perps Assistant*!\n"+
+        "Use /setup, or /trade for guided signals, or /ask for free query.",
+        parse_mode=ParseMode.MARKDOWN
     )
 
-async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_cmd(update:Update,ctx:ContextTypes.DEFAULT_TYPE)->None:
     await update.message.reply_text(
-        "/setup – profile wizard\n/ask BTC outlook? – quick answer\n/faq – perps primer"
+        "/setup – profile wizard\n"+
+        "/trade – step-by-step signal\n"+
+        "/ask – free-form query\n"+
+        "/cancel – abort"
     )
 
-async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        textwrap.dedent(
-            """*Perps 101*\n• Funding every 8h\n• Mark price avoids wicks\n• Keep margin buffer"""
-        ),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-# ───────────────────────────── Setup Wizard ────────────────────────────── #
-async def setup_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    ctx.user_data['i'] = 0
-    ctx.user_data['ans'] = {}
-    await update.message.reply_text("Let's set up your profile – /cancel anytime.")
-    return await ask_next(update, ctx)
-
-async def ask_next(update_or_q, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    idx = ctx.user_data['i']
-    if idx >= len(QUESTS):
-        save_profile(update_or_q.effective_user.id, ctx.user_data['ans'])
-        await update_or_q.message.reply_text("✅ Saved! Now /ask your first question.")
-        return ConversationHandler.END
-    _, question = QUESTS[idx]
-    await update_or_q.message.reply_text(f"[{idx+1}/{len(QUESTS)}] {question}")
+# Setup wizard
+async def setup_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE)->int:
+    ctx.user_data.update({'i':0,'ans':{}})
+    await update.message.reply_text("Let's set up your trading profile ("+
+                                 f"{len(QUESTS)} questions) – /cancel anytime.")
+    _,q=QUESTS[0]
+    await update.message.reply_text(f"[1/{len(QUESTS)}] {q}")
     return SETUP
 
-async def collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    i = ctx.user_data['i']
-    key, _ = QUESTS[i]
-    ctx.user_data['ans'][key] = update.message.text.strip()
-    ctx.user_data['i'] = i + 1
-    return await ask_next(update, ctx)
-
-async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Cancelled.")
+async def collect(update:Update,ctx:ContextTypes.DEFAULT_TYPE)->int:
+    i=ctx.user_data['i']; key,_=QUESTS[i]
+    ctx.user_data['ans'][key]=update.message.text.strip(); ctx.user_data['i']=i+1
+    if ctx.user_data['i']<len(QUESTS):
+        _,q=QUESTS[ctx.user_data['i']]
+        await update.message.reply_text(f"[{ctx.user_data['i']+1}/{len(QUESTS)}] {q}")
+        return SETUP
+    save_profile(update.effective_user.id,ctx.user_data['ans'])
+    await update.message.reply_text("✅ Profile saved! Now /trade or /ask.")
     return ConversationHandler.END
 
-# ───────────────────────────── /ask Handler ────────────────────────────── #
-async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    prof = load_profile(update.effective_user.id)
+async def cancel(update:Update,ctx:ContextTypes.DEFAULT_TYPE)->int:
+    await update.message.reply_text("Setup cancelled.")
+    return ConversationHandler.END
+
+# Guided /trade flow
+async def trade_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE)->int:
+    prof=load_profile(update.effective_user.id)
     if not prof:
-        await update.message.reply_text(
-            "⚠️ Please run /setup to provide your trading profile before asking for signals."
-        )
-        return
+        await update.message.reply_text("⚠️ Please run /setup first.")
+        return ConversationHandler.END
+    assets=["BTC","ETH","SOL","ADA","DOT"]
+    kb=[[InlineKeyboardButton(a,callback_data=f"asset:{a}") for a in assets]]
+    await update.message.reply_text("Select asset:",reply_markup=InlineKeyboardMarkup(kb))
+    return TRADE_ASSET
 
-    # Indicate typing
-    await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-    await update.message.reply_text("🧠 Analyzing market trends…")
-    query = " ".join(ctx.args) or "Give me a market outlook."
+async def asset_choice(query:CallbackQuery,ctx:ContextTypes.DEFAULT_TYPE)->int:
+    asset=query.data.split(':',1)[1]; ctx.user_data['trade_asset']=asset
+    kb=[[InlineKeyboardButton("Long",callback_data="type:long"),
+         InlineKeyboardButton("Short",callback_data="type:short")]]
+    await query.edit_message_text(f"Asset: {asset}\nChoose direction:",
+                                  reply_markup=InlineKeyboardMarkup(kb))
+    return TRADE_TYPE
 
-    try:
-        async with token_lock:
-            answer = await asyncio.get_running_loop().run_in_executor(
-                None, functools.partial(rei_call, query, prof)
-            )
-    except Exception:
-        logging.exception("REI error")
-        await update.message.reply_text("⚠️ REI CORE did not respond – try later.")
-        return
+async def type_choice(query:CallbackQuery,ctx:ContextTypes.DEFAULT_TYPE)->int:
+    typ=query.data.split(':',1)[1]; ctx.user_data['trade_type']=typ
+    kb=[[InlineKeyboardButton("Concise", callback_data="diff:concise"), InlineKeyboardButton("Detailed", callback_data="diff:detailed")]]
+    await query.edit_message_text(f"Direction: {typ.upper()}\nSelect difficulty:",
+                                  reply_markup=InlineKeyboardMarkup(kb))
+    return TRADE_DIFF
 
-    await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
-
-# ───────────────────────────── Entrypoint ────────────────────────────── #
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    init_db()
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("faq", faq_cmd))
-    app.add_handler(CommandHandler("ask", ask_cmd))
-
-    wizard = ConversationHandler(
-        entry_points=[CommandHandler("setup", setup_start)],
-        states={SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
+async def diff_choice(query:CallbackQuery,ctx:ContextTypes.DEFAULT_TYPE)->int:
+    diff=query.data.split(':',1)[1]
+    asset=ctx.user_data['trade_asset']; typ=ctx.user_data['trade_type']
+    prof=load_profile(query.from_user.id)
+    # build formatted prompt
+    p_txt="\n".join(f"{k}: {v}" for k,v in prof.items())
+    prompt=(
+        f"Trader profile:\n{p_txt}\n"+
+        f"Request: {typ.upper()} {asset} signal."
+        f" Format: RECOMMENDATION; ENTRY; STOP-LOSS; TAKE-PROFIT; RISK-REWARD."
+        f" Response length: {'Concise' if diff=='concise' else 'Detailed'}.""
     )
-    app.add_handler(wizard)
+    await query.edit_message_text("🧠 Generating formatted signal…")
+    loop=asyncio.get_running_loop()
+    async with token_lock:
+        ans=await loop.run_in_executor(None,functools.partial(rei_call,prompt,prof))
+    prefix="🟢 LONG" if typ=='long' else "🔴 SHORT"
+    await query.message.reply_text(f"{prefix} {asset}\n{ans}",parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
 
+# Free-form /ask
+async def ask_cmd(update:Update,ctx:ContextTypes.DEFAULT_TYPE)->None:
+    prof=load_profile(update.effective_user.id)
+    if not prof:
+        await update.message.reply_text("⚠️ Please run /setup first."); return
+    await ctx.bot.send_chat_action(chat_id=update.effective_chat.id,action=ChatAction.TYPING)
+    await update.message.reply_text("🧠 Analyzing market trends…")
+    q=" ".join(ctx.args) or "Give me a market outlook."
+    loop=asyncio.get_running_loop()
+    async with token_lock:
+        ans=await loop.run_in_executor(None,functools.partial(rei_call,q,prof))
+    await update.message.reply_text(ans,parse_mode=ParseMode.MARKDOWN)
+
+# Entrypoint
+def main()->None:
+    logging.basicConfig(level=logging.INFO)
+    init_db()
+    app=Application.builder().token(BOT_TOKEN).concurrent_updates(False).build()
+    app.add_handler(CommandHandler("start",start))
+    app.add_handler(CommandHandler("help",help_cmd))
+    app.add_handler(CommandHandler("setup",setup_start))
+    app.add_handler(CommandHandler("ask",ask_cmd))
+    # setup wizard
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("setup",setup_start)],
+        states={SETUP:[MessageHandler(filters.TEXT&~filters.COMMAND,collect)]},
+        fallbacks=[CommandHandler("cancel",cancel)]
+    ))
+    # trade wizard
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("trade",trade_start)],
+        states={
+            TRADE_ASSET:[CallbackQueryHandler(asset_choice,pattern="^asset:")],
+            TRADE_TYPE:[CallbackQueryHandler(type_choice,pattern="^type:")],
+            TRADE_DIFF:[CallbackQueryHandler(diff_choice,pattern="^diff:")],
+        },
+        fallbacks=[CommandHandler("cancel",cancel)]
+    ))
     app.run_polling()
 
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
