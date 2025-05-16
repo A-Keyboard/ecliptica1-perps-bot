@@ -1,14 +1,12 @@
-# ecliptica_bot.py — v0.6.12
+# ecliptica_bot.py — v0.6.13
 """
 Ecliptica Perps Assistant — Telegram trading bot with guided /trade flow, suggestions, and formatted AI responses
 
-v0.6.12
+v0.6.13
 ──────
-• Added “Suggest signal” option for AI-driven trade recommendations
-• Fixed indentation errors
-• Ensured /trade always shows keyboard
-• Added fallback handling for manual symbol entry
-• Maintained concise vs detailed output
+• Improved REI call error handling (catch timeouts & network failures)
+• User sees clear error on REI failures, no more silent hangs
+• Wrapped REI executor calls in try/except to recover gracefully
 """
 from __future__ import annotations
 import os
@@ -24,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Final, List
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.constants import ChatAction, ParseMode
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -43,7 +41,7 @@ def init_env():
     load_dotenv()
     global BOT_TOKEN, REI_KEY
     BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    REI_KEY = os.environ.get("REICORE_API_KEY", "").strip()
+    REI_KEY   = os.environ.get("REICORE_API_KEY", "").strip()
 
 # Database
 db_path: Final[str] = "ecliptica.db"
@@ -66,9 +64,7 @@ def load_profile(uid: int) -> dict[str, str]:
         cur = con.cursor()
         cur.execute("SELECT data FROM profile WHERE uid=?", (uid,))
         row = cur.fetchone()
-    if row:
-        return json.loads(row[0])
-    return {}
+    return json.loads(row[0]) if row else {}
 
 # Asset list
 ASSETS: List[str] = []
@@ -76,9 +72,7 @@ ASSETS: List[str] = []
 def init_assets() -> None:
     global ASSETS
     try:
-        r = requests.get(
-            "https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10
-        )
+        r = requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10)
         r.raise_for_status()
         ASSETS = sorted(
             [s["symbol"] for s in r.json().get("symbols", []) if s.get("contractType") == "PERPETUAL"]
@@ -100,12 +94,9 @@ QUESTS: Final[list[tuple[str, str]]] = [
 ]
 SETUP, TRADE_ASSET, TRADE_TYPE, TRADE_LEN = range(4)
 
-# REI API call
+# REI API call with robust error handling
 def rei_call(prompt: str, profile: dict[str, str]) -> str:
-    headers = {
-        "Authorization": f"Bearer {REI_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
     messages = []
     if profile:
         profile_txt = "\n".join(f"{k}: {v}" for k, v in profile.items())
@@ -123,12 +114,17 @@ def rei_call(prompt: str, profile: dict[str, str]) -> str:
             )
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"].strip()
+        except requests.Timeout:
+            logging.warning(f"REI timeout on attempt {attempt+1}")
         except requests.HTTPError as e:
-            code = getattr(e.response, 'status_code', None)
-            if attempt < 2 and code and 500 <= code < 600:
+            code = e.response.status_code if e.response else None
+            if code and 500 <= code < 600 and attempt < 2:
                 time.sleep(2 ** attempt)
                 continue
-            raise
+            logging.error(f"REI HTTPError: {e}")
+        except requests.RequestException as e:
+            logging.error(f"REI network error: {e}")
+        time.sleep(2 ** attempt)
     raise RuntimeError("REI API failed after 3 attempts")
 
 # Handlers
@@ -188,14 +184,18 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def asset_choice_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip().upper()
+    prof = load_profile(update.effective_user.id)
     if text == "SUGGEST SIGNAL":
-        prof = load_profile(update.effective_user.id)
         prompt = "Generate one high-confidence perpetual futures trade signal for me: asset, direction, entry, stop, take-profit, R:R."
         await update.message.reply_text("🧠 Suggesting signal…")
-        loop = asyncio.get_running_loop()
-        async with token_lock:
-            res = await loop.run_in_executor(None, functools.partial(rei_call, prompt, prof))
-        await update.message.reply_text(res, parse_mode=ParseMode.MARKDOWN)
+        try:
+            loop = asyncio.get_running_loop()
+            async with token_lock:
+                res = await loop.run_in_executor(None, functools.partial(rei_call, prompt, prof))
+            await update.message.reply_text(res, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            logging.exception("REI call failed")
+            await update.message.reply_text("⚠️ REI CORE error — please try again later.")
         return ConversationHandler.END
     if text == "TYPE MANUALLY":
         await update.message.reply_text("Enter symbol (e.g. BTCUSDT):")
@@ -204,11 +204,10 @@ async def asset_choice_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         await update.message.reply_text("Invalid symbol. Try again.")
         return TRADE_ASSET
     ctx.user_data['asset'] = text
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Long", callback_data="type:long"),
-         InlineKeyboardButton("Short", callback_data="type:short")]
+    kb2 = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Long", callback_data="type:long"), InlineKeyboardButton("Short", callback_data="type:short")]
     ])
-    await update.message.reply_text(f"Asset: {text}\nChoose direction:", reply_markup=kb)
+    await update.message.reply_text(f"Asset: {text}\nChoose direction:", reply_markup=kb2)
     return TRADE_TYPE
 
 async def type_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -216,11 +215,10 @@ async def type_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
     choice = query.data.split(':')[1]
     ctx.user_data['type'] = choice
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Concise", callback_data="len:concise"),
-         InlineKeyboardButton("Detailed", callback_data="len:detailed")]
+    kb3 = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Concise", callback_data="len:concise"), InlineKeyboardButton("Detailed", callback_data="len:detailed")]
     ])
-    await query.edit_message_text(f"Direction: {choice.upper()}\nSelect length:", reply_markup=kb)
+    await query.edit_message_text(f"Direction: {choice.upper()}\nSelect length:", reply_markup=kb3)
     return TRADE_LEN
 
 async def len_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -236,11 +234,15 @@ async def len_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         f"Signal: {trade_type.upper()} {asset}. Format: ENTRY; STOP; TP; R:R. Length: {length}."
     )
     await query.edit_message_text("🧠 Generating…")
-    loop = asyncio.get_running_loop()
-    async with token_lock:
-        res = await loop.run_in_executor(None, functools.partial(rei_call, prompt, prof))
-    prefix = "🟢 LONG" if trade_type == "long" else "🔴 SHORT"
-    await query.message.reply_text(f"{prefix} {asset}\n{res}", parse_mode=ParseMode.MARKDOWN)
+    try:
+        loop = asyncio.get_running_loop()
+        async with token_lock:
+            res = await loop.run_in_executor(None, functools.partial(rei_call, prompt, prof))
+        prefix = "🟢 LONG" if trade_type == "long" else "🔴 SHORT"
+        await query.message.reply_text(f"{prefix} {asset}\n{res}", parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        logging.exception("REI call failed")
+        await query.message.reply_text("⚠️ REI CORE error — please try again later.")
     return ConversationHandler.END
 
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -248,13 +250,16 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not prof:
         await update.message.reply_text("⚠️ Run /setup first.")
         return
-    await ctx.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
     await update.message.reply_text("🧠 Analyzing…")
     q = " ".join(ctx.args) or "Give me a market outlook."
-    loop = asyncio.get_running_loop()
-    async with token_lock:
-        ans = await loop.run_in_executor(None, functools.partial(rei_call, q, prof))
-    await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
+    try:
+        loop = asyncio.get_running_loop()
+        async with token_lock:
+            ans = await loop.run_in_executor(None, functools.partial(rei_call, q, prof))
+        await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        logging.exception("REI call failed")
+        await update.message.reply_text("⚠️ REI CORE error — please try again later.")
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
