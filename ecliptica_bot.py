@@ -40,7 +40,8 @@ REI_KEY:   Final[str] = os.environ.get("REICORE_API_KEY",""
 ).strip()
 DB = "ecliptica.db"
 
-# Profile questions\QUESTS: Final[list[tuple[str,str]]] = [
+# Profile questions
+QUESTS: Final[list[tuple[str,str]]] = [
     ("experience", "Your perps experience? (0-3m / 3-12m / >12m)"),
     ("capital",    "Capital allocated (USD)"),
     ("risk",       "Max loss % (e.g. 2)"),
@@ -171,7 +172,7 @@ async def diff_choice(query:CallbackQuery,ctx:ContextTypes.DEFAULT_TYPE)->int:
         f"Trader profile:\n{p_txt}\n"+
         f"Request: {typ.upper()} {asset} signal."
         f" Format: RECOMMENDATION; ENTRY; STOP-LOSS; TAKE-PROFIT; RISK-REWARD."
-        f" Response length: {'Concise' if diff=='concise' else 'Detailed'}.""
+        f" Response length: {'Concise' if diff=='concise' else 'Detailed'}."
     )
     await query.edit_message_text("🧠 Generating formatted signal…")
     loop=asyncio.get_running_loop()
