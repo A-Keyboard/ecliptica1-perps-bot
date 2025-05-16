@@ -94,8 +94,9 @@ def init_db() -> None:
     with sqlite3.connect(DB) as con:
         con.execute("CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)")
 
-def save_profile(uid:int,data:dict[str,str]) -> None:
+def save_profile(uid: int, data: dict[str, str]) -> None:
     with sqlite3.connect(DB) as con:
+        con.execute("REPLACE INTO profile VALUES(?,?)", (uid, json.dumps(data))) as con:
         con.execute("REPLACE INTO profile VALUES(?,?)",(uid,json.dumps(data)))
 
 ...")
