@@ -38,6 +38,44 @@ BOT_TOKEN: Final[str] = os.environ.get("TELEGRAM_BOT_TOKEN","").strip()
 REI_KEY:   Final[str] = os.environ.get("REICORE_API_KEY","").strip()
 DB = "ecliptica.db"
 
+# Asset universe (Perps instruments)
+# Dynamically fetched from public exchange APIs (no API key required)
+async def fetch_binance_assets() -> list[str]:
+    """Fetch perpetual futures symbols from Binance public API"""
+    try:
+        res = requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10)
+        res.raise_for_status()
+        data = res.json()
+        return [s['symbol'] for s in data.get('symbols', []) if s.get('contractType') == 'PERPETUAL']
+    except Exception:
+        logging.warning("Binance assets fetch failed, falling back to static list.")
+        return []
+
+async def fetch_bybit_assets() -> list[str]:
+    """Fetch perpetual symbols from Bybit public API"""
+    try:
+        res = requests.get("https://api.bybit.com/v2/public/symbols", timeout=10)
+        res.raise_for_status()
+        data = res.json().get('result', [])
+        return [item['name'] for item in data if item.get('status') == 'Trading' and 'perpetual' in item.get('typ', '').lower()]
+    except Exception:
+        logging.warning("Bybit assets fetch failed, falling back to static list.")
+        return []
+
+# At startup: combine
+ASSETS: Final[list[str]] = []
+
+async def init_assets():
+    global ASSETS
+    # try dynamic fetch, else fallback to hard-coded
+    binance = await fetch_binance_assets()
+    bybit   = await fetch_bybit_assets()
+    static  = [
+        # fallback static sample list
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "BTCUSD", "ETHUSD", "BTC-PERP",
+    ]
+    ASSETS = sorted(set(binance + bybit + static))
+
 # Profile questions
 QUESTS: Final[list[tuple[str,str]]] = [
     ("experience", "Your perps experience? (0-3m / 3-12m / >12m)"),
