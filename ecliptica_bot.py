@@ -434,6 +434,50 @@ async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
     print(f"STDERR: All {max_retries + 1} attempts failed. Last error: {str(last_error)}", file=sys.stderr)
     raise Exception(f"Failed to get response after {max_retries + 1} attempts: {str(last_error)}")
 
+# Add an alternative REI API call function that uses a different endpoint
+async def rei_call_alternative(prompt: str) -> str:
+    """Make an API call to a more reliable REI API endpoint as fallback."""
+    logger.info(f"Making alternative REI API call with prompt length: {len(prompt)}")
+    print(f"STDOUT: Trying alternative API endpoint with prompt length: {len(prompt)}", file=sys.stdout)
+    
+    headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
+    
+    # Use a simpler model with lower timeout
+    body = {
+        "model": "gpt-3.5-turbo",  # Use a simpler model as fallback
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1000,
+        "temperature": 0.7
+    }
+    
+    try:
+        # Use a short timeout to avoid waiting too long
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.openai.com/v1/chat/completions",  # OpenAI-compatible endpoint
+                headers=headers,
+                json=body,
+                timeout=60  # Shorter timeout
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"Alternative API error: Status {resp.status}, Response: {error_text}")
+                    raise Exception(f"Alternative API returned status {resp.status}")
+                
+                data = await resp.json()
+                if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
+                    logger.error(f"Unexpected alternative API response format: {data}")
+                    raise Exception("Invalid response format from alternative API")
+                
+                content = data["choices"][0]["message"]["content"].strip()
+                logger.info(f"Successfully received alternative response of length: {len(content)}")
+                return content
+                
+    except Exception as e:
+        logger.error(f"Alternative API call failed: {str(e)}")
+        # If even this fails, use the fallback response
+        raise
+
 # ───────────────────────────── telegram callbacks ────────────────────────── #
 INIT_MENU = ReplyKeyboardMarkup(
     [["▶️ Start"]], resize_keyboard=True, one_time_keyboard=True
@@ -657,7 +701,7 @@ def get_fallback_response(asset: str = "", analysis_type: str = "") -> str:
         return (f"I'm having trouble connecting to my analysis service to provide information about {asset}. "
                 f"Please try again in a few minutes, or try a different request.")
 
-# Now update the button_click handler to use the fallback function for analysis failures 
+# Update the button_click handler to use our new handler function
 async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button clicks."""
     query = update.callback_query
@@ -668,6 +712,9 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Received callback query with data: {query.data}")
     
     try:
+        # Start watchdog timer for this command
+        start_watchdog()
+        
         # Always answer callback query first to prevent "loading" state
         await query.answer()
         
@@ -678,6 +725,7 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 "Sorry, there was an error. Please try again.",
                 reply_markup=MAIN_MENU
             )
+            stop_watchdog()
             return
             
         action, value = query.data.split(":", 1)
@@ -685,6 +733,7 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         
         # Special handling for setup:start action
         if action == "setup" and value == "start":
+            stop_watchdog()
             return await setup_start(query, ctx)
             
         # For all other actions, check profile first
@@ -704,6 +753,7 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 "• And more...",
                 reply_markup=markup
             )
+            stop_watchdog()
             return
             
         profile_context = await format_profile_context(profile)
@@ -715,180 +765,26 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.info(f"Processing {analysis_type} analysis request for {asset}")
                 
                 if analysis_type == "market":
-                    await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
-                    try:
-                        logger.debug("Preparing market analysis prompt")
-                        prompt = (
-                            f"Provide a comprehensive market analysis for {asset}, considering the user's profile."
-                            f"{profile_context}\n\n"
-                            f"Include:\n"
-                            f"1. Technical Analysis\n"
-                            f"   - Trend analysis (focus on {profile.get('timeframe', 'all')} timeframe)\n"
-                            f"   - Support/resistance levels\n"
-                            f"   - Chart patterns and formations\n"
-                            f"   - Key technical indicators\n\n"
-                            f"2. Market Structure\n"
-                            f"   - Current market phase\n"
-                            f"   - Recent price action\n"
-                            f"   - Volume profile\n"
-                            f"   - Market dominance\n\n"
-                            f"3. Fundamental Analysis\n"
-                            f"   - Recent news/developments\n"
-                            f"   - Network metrics (if applicable)\n"
-                            f"   - Funding rates (important for user's preference)\n"
-                            f"   - Market sentiment\n\n"
-                            f"4. Risk Assessment\n"
-                            f"   - Volatility analysis\n"
-                            f"   - Liquidity conditions\n"
-                            f"   - Potential risks/catalysts\n"
-                            f"   - Correlation with market\n"
-                            f"   - Suitability for user's risk profile"
-                        )
-                        logger.debug("Calling REI API for market analysis")
-                        start_time = datetime.now()
-                        logger.debug(f"Starting REI API call at {start_time}")
-                        
-                        try:
-                            response = await rei_call(prompt)
-                        except Exception as api_e:
-                            end_time = datetime.now()
-                            duration = (end_time - start_time).total_seconds()
-                            logger.error(f"REI API call failed after {duration} seconds with error: {str(api_e)}")
-                            # Use fallback response
-                            logger.info(f"Using fallback response for {asset} market analysis")
-                            response = get_fallback_response(asset, "market")
-                            
-                        end_time = datetime.now()
-                        duration = (end_time - start_time).total_seconds()
-                        logger.info(f"REI API call completed in {duration} seconds")
-                        logger.info(f"Got response of length: {len(response)}")
-                        
-                        # Split response into chunks if too long
-                        if len(response) > 4096:
-                            logger.debug("Response too long, splitting into chunks")
-                            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
-                            for i, chunk in enumerate(chunks):
-                                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
-                                try:
-                                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
-                                except Exception as chunk_e:
-                                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
-                                    # If markdown fails, try sending without parsing
-                                    await query.message.reply_text(chunk)
-                        else:
-                            logger.debug("Sending single response message")
-                            try:
-                                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
-                            except Exception as send_e:
-                                logger.error(f"Error sending response with markdown: {str(send_e)}")
-                                # If markdown fails, try sending without parsing
-                                await query.message.reply_text(response)
-                                
-                    except Exception as e:
-                        logger.error(f"Error in market analysis flow: {str(e)}", exc_info=True)
-                        await query.message.reply_text(
-                            get_fallback_response(asset, "market"),
-                            reply_markup=MAIN_MENU
-                        )
-                        return
-                
-            except ValueError as e:
-                logger.error(f"Invalid analysis value format: {value}, error: {str(e)}")
-                await query.message.reply_text(
-                    "Sorry, there was an error processing your request. Please try again.",
-                    reply_markup=MAIN_MENU
-                )
+                    await handle_market_analysis(query, asset, profile_context, profile)
+                elif analysis_type == "setup":
+                    # Similar handler for setup could be implemented here
+                    await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
+                    # Use fallback for now
+                    await query.message.reply_text(get_fallback_response(asset, "setup"))
+                    
             except Exception as e:
-                logger.error(f"Unexpected error in analysis handling: {str(e)}", exc_info=True)
+                logger.error(f"Error in analysis handler: {str(e)}", exc_info=True)
                 await query.message.reply_text(
                     "An unexpected error occurred. Please try again later.",
                     reply_markup=MAIN_MENU
                 )
         
-        elif action == "trade":
-            if value == "SUGGEST":
-                logger.debug("Processing suggestion request")
-                await query.message.reply_text("🧠 Analyzing market conditions...")
-                try:
-                    start_time = datetime.now()
-                    logger.debug(f"Starting trade suggestion REI API call at {start_time}")
-                    
-                    try:
-                        suggestion = await rei_call(
-                            "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
-                            f"{profile_context}\n\n"
-                            "Include:\n"
-                            "1. Asset selection and reasoning\n"
-                            "2. Entry strategy with specific levels\n"
-                            "3. Stop loss placement\n"
-                            "4. Take profit targets\n"
-                            "5. Risk:reward ratio\n"
-                            "6. Key market conditions supporting this trade\n"
-                            "7. Compatibility with user's profile"
-                        )
-                    except Exception as api_e:
-                        end_time = datetime.now()
-                        duration = (end_time - start_time).total_seconds()
-                        logger.error(f"Trade suggestion REI API call failed after {duration} seconds with error: {str(api_e)}")
-                        raise api_e
-                        
-                    end_time = datetime.now()
-                    duration = (end_time - start_time).total_seconds()
-                    logger.info(f"Trade suggestion REI API call completed successfully in {duration} seconds")
-                    logger.info(f"Successfully received trade suggestion of length: {len(suggestion)}")
-                    
-                    # Split response into chunks if too long
-                    if len(suggestion) > 4096:
-                        logger.debug("Suggestion too long, splitting into chunks")
-                        chunks = [suggestion[i:i+4096] for i in range(0, len(suggestion), 4096)]
-                        for i, chunk in enumerate(chunks):
-                            logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
-                            try:
-                                await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
-                            except Exception as chunk_e:
-                                logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
-                                # If markdown fails, try sending without parsing
-                                await query.message.reply_text(chunk)
-                    else:
-                        logger.debug("Sending single suggestion message")
-                        try:
-                            await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
-                        except Exception as send_e:
-                            logger.error(f"Error sending suggestion with markdown: {str(send_e)}")
-                            # If markdown fails, try sending without parsing
-                            await query.message.reply_text(suggestion)
-                            
-                except Exception as e:
-                    logger.error(f"Error getting trade suggestion: {str(e)}")
-                    await query.message.reply_text(
-                        "Sorry, I couldn't generate a trade suggestion at the moment. Please try again later.",
-                        reply_markup=MAIN_MENU
-                    )
-                
-            elif value == "CUSTOM":
-                logger.debug("Processing custom asset request")
-                await query.message.edit_text("Enter asset symbol (e.g. BTC):")
-                
-            elif value.endswith("-PERP"):
-                logger.debug(f"Processing {value} analysis options")
-                buttons = [
-                    [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{value}")],
-                    [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{value}")]
-                ]
-                markup = InlineKeyboardMarkup(buttons)
-                await query.message.edit_text(
-                    f"Choose analysis type for {value}:",
-                    reply_markup=markup
-                )
-            
-        else:
-            logger.warning(f"Unknown action in callback: {action}")
-            await query.message.reply_text(
-                "Invalid option. Please try again.",
-                reply_markup=MAIN_MENU
-            )
+        # Make sure watchdog is stopped before returning
+        stop_watchdog()
             
     except Exception as e:
+        # Make sure watchdog is stopped in case of error
+        stop_watchdog()
         logger.error(f"Error in button_click: {str(e)}", exc_info=True)
         try:
             await query.message.reply_text(
@@ -897,6 +793,101 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception as nested_e:
             logger.error(f"Failed to send error message: {str(nested_e)}")
+
+async def handle_market_analysis(query, asset, profile_context, profile):
+    """Handle market analysis request with reliable fallbacks."""
+    await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
+    try:
+        logger.debug("Preparing market analysis prompt")
+        prompt = (
+            f"Provide a comprehensive market analysis for {asset}, considering the user's profile."
+            f"{profile_context}\n\n"
+            f"Include:\n"
+            f"1. Technical Analysis\n"
+            f"   - Trend analysis (focus on {profile.get('timeframe', 'all')} timeframe)\n"
+            f"   - Support/resistance levels\n"
+            f"   - Chart patterns and formations\n"
+            f"   - Key technical indicators\n\n"
+            f"2. Market Structure\n"
+            f"   - Current market phase\n"
+            f"   - Recent price action\n"
+            f"   - Volume profile\n"
+            f"   - Market dominance\n\n"
+            f"3. Fundamental Analysis\n"
+            f"   - Recent news/developments\n"
+            f"   - Network metrics (if applicable)\n"
+            f"   - Funding rates (important for user's preference)\n"
+            f"   - Market sentiment\n\n"
+            f"4. Risk Assessment\n"
+            f"   - Volatility analysis\n"
+            f"   - Liquidity conditions\n"
+            f"   - Potential risks/catalysts\n"
+            f"   - Correlation with market\n"
+            f"   - Suitability for user's risk profile"
+        )
+        
+        logger.debug("Calling REI API for market analysis")
+        start_time = datetime.now()
+        logger.debug(f"Starting REI API call at {start_time}")
+        
+        # Try primary API first
+        try:
+            response = await rei_call(prompt)
+            logger.info("Primary API call succeeded")
+        except Exception as primary_e:
+            logger.warning(f"Primary API call failed: {str(primary_e)}")
+            
+            # Try alternative API
+            try:
+                logger.info("Trying alternative API endpoint")
+                shorter_prompt = (
+                    f"Provide a concise market analysis for {asset} with these key points:\n"
+                    f"- Current trend and price action\n"
+                    f"- Key support/resistance levels\n"
+                    f"- Technical indicators and patterns\n"
+                    f"- Market sentiment and outlook\n"
+                    f"- Risk assessment and recommendation"
+                )
+                response = await rei_call_alternative(shorter_prompt)
+                logger.info("Alternative API call succeeded")
+            except Exception as alt_e:
+                logger.error(f"Alternative API also failed: {str(alt_e)}")
+                # Fall back to static response
+                response = get_fallback_response(asset, "market")
+                logger.info("Using static fallback response")
+        
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.info(f"Total processing time: {duration} seconds")
+        
+        # Split response into chunks if too long
+        if len(response) > 4096:
+            logger.debug("Response too long, splitting into chunks")
+            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
+            for i, chunk in enumerate(chunks):
+                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
+                try:
+                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+                except Exception as chunk_e:
+                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
+                    # If markdown fails, try sending without parsing
+                    await query.message.reply_text(chunk)
+        else:
+            logger.debug("Sending single response message")
+            try:
+                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+            except Exception as send_e:
+                logger.error(f"Error sending response with markdown: {str(send_e)}")
+                # If markdown fails, try sending without parsing
+                await query.message.reply_text(response)
+                
+    except Exception as e:
+        logger.error(f"Complete failure in market analysis: {str(e)}", exc_info=True)
+        # Last resort fallback
+        await query.message.reply_text(
+            get_fallback_response(asset, "market"),
+            reply_markup=MAIN_MENU
+        )
 
 async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle custom asset input from user."""
