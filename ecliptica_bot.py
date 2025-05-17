@@ -223,7 +223,7 @@ async def rei_call(prompt: str) -> str:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "https://api.reisearch.box/v1/chat/completions",
+            "https://api.reisearch.box/v1/chat/completions",
                 headers=headers,
                 json=body,
                 timeout=300
@@ -287,10 +287,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Start command handler with error logging"""
     try:
         logger.info(f"Start command received from user {update.effective_user.id}")
-        await update.message.reply_text(
-            "👋 Welcome! Press ▶️ Start to begin.",
-            reply_markup=INIT_MENU
-        )
+    await update.message.reply_text(
+        "👋 Welcome! Press ▶️ Start to begin.",
+        reply_markup=INIT_MENU
+    )
         logger.info("Start message sent successfully")
     except Exception as e:
         logger.error(f"Error in start command: {str(e)}", exc_info=True)
@@ -361,9 +361,9 @@ async def handle_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             await query.answer("Invalid callback format")
             return SETUP
             
-        _, key, value = data
-        ctx.user_data["ans"][key] = value
-        ctx.user_data["i"] += 1
+    _, key, value = data
+    ctx.user_data["ans"][key] = value
+    ctx.user_data["i"] += 1
         
         await query.answer(f"Selected: {value}")
         
@@ -521,48 +521,7 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         profile_context = await format_profile_context(profile)
         logger.debug("Formatted profile context successfully")
         
-        if action == "trade":
-            if value == "SUGGEST":
-                logger.debug("Processing suggestion request")
-                await query.message.reply_text("🧠 Analyzing market conditions...")
-                try:
-                    suggestion = await rei_call(
-                        "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
-                        f"{profile_context}\n\n"
-                        "Include:\n"
-                        "1. Asset selection and reasoning\n"
-                        "2. Entry strategy with specific levels\n"
-                        "3. Stop loss placement\n"
-                        "4. Take profit targets\n"
-                        "5. Risk:reward ratio\n"
-                        "6. Key market conditions supporting this trade\n"
-                        "7. Compatibility with user's profile"
-                    )
-                    await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
-                except Exception as e:
-                    logger.error(f"Error getting trade suggestion: {str(e)}")
-                    await query.message.reply_text(
-                        "Sorry, I couldn't generate a trade suggestion at the moment. Please try again later.",
-                        reply_markup=MAIN_MENU
-                    )
-                
-            elif value == "CUSTOM":
-                logger.debug("Processing custom asset request")
-                await query.message.edit_text("Enter asset symbol (e.g. BTC):")
-                
-            elif value.endswith("-PERP"):
-                logger.debug(f"Processing {value} analysis options")
-                buttons = [
-                    [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{value}")],
-                    [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{value}")]
-                ]
-                markup = InlineKeyboardMarkup(buttons)
-                await query.message.edit_text(
-                    f"Choose analysis type for {value}:",
-                    reply_markup=markup
-                )
-                
-        elif action == "analysis":
+        if action == "analysis":
             try:
                 analysis_type, asset = value.split(":", 1)
                 logger.info(f"Processing {analysis_type} analysis request for {asset}")
@@ -600,7 +559,28 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                         logger.debug("Calling REI API for market analysis")
                         response = await rei_call(prompt)
                         logger.info(f"Successfully received market analysis response of length: {len(response)}")
-                        await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+                        
+                        # Split response into chunks if too long
+                        if len(response) > 4096:
+                            logger.debug("Response too long, splitting into chunks")
+                            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
+                            for i, chunk in enumerate(chunks):
+                                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
+                                try:
+                                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+                                except Exception as chunk_e:
+                                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
+                                    # If markdown fails, try sending without parsing
+                                    await query.message.reply_text(chunk)
+                        else:
+                            logger.debug("Sending single response message")
+                            try:
+                                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+                            except Exception as send_e:
+                                logger.error(f"Error sending response with markdown: {str(send_e)}")
+                                # If markdown fails, try sending without parsing
+                                await query.message.reply_text(response)
+                                
                     except Exception as e:
                         logger.error(f"Error generating market analysis: {str(e)}", exc_info=True)
                         await query.message.reply_text(
@@ -707,8 +687,8 @@ def init_handlers(application: Application) -> None:
         states={
             SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
-    )
+            fallbacks=[CommandHandler('cancel', cancel)]
+        )
     
     # Add all handlers
     application.add_handler(CommandHandler('start', start))
