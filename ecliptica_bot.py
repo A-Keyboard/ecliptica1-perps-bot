@@ -493,6 +493,7 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
             
         action, value = query.data.split(":", 1)
+        logger.debug(f"Processing action: {action}, value: {value}")
         
         # Special handling for setup:start action
         if action == "setup" and value == "start":
@@ -500,6 +501,8 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             
         # For all other actions, check profile first
         profile = await get_user_profile(query.from_user.id)
+        logger.debug(f"Retrieved profile for user {query.from_user.id}: {profile is not None}")
+        
         if not profile and action != "setup":
             buttons = [[InlineKeyboardButton("🔧 Setup Profile Now", callback_data="setup:start")]]
             markup = InlineKeyboardMarkup(buttons)
@@ -516,6 +519,7 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
             
         profile_context = await format_profile_context(profile)
+        logger.debug("Formatted profile context successfully")
         
         if action == "trade":
             if value == "SUGGEST":
@@ -561,46 +565,13 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         elif action == "analysis":
             try:
                 analysis_type, asset = value.split(":", 1)
-                logger.debug(f"Processing {analysis_type} request for {asset}")
+                logger.info(f"Processing {analysis_type} analysis request for {asset}")
                 
-                if analysis_type == "setup":
-                    await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
-                    try:
-                        response = await rei_call(
-                            f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
-                            f"{profile_context}\n\n"
-                            f"Include:\n"
-                            f"1. Current Market Context\n"
-                            f"   - Price action summary\n"
-                            f"   - Key levels in play\n"
-                            f"   - Market structure\n\n"
-                            f"2. Trade Setup Details\n"
-                            f"   - Entry zone/price with reasoning\n"
-                            f"   - Stop loss placement and rationale\n"
-                            f"   - Take profit targets (multiple levels)\n"
-                            f"   - Position sizing based on user's capital and risk\n\n"
-                            f"3. Risk Management\n"
-                            f"   - Risk:reward ratio\n"
-                            f"   - Maximum risk per trade (based on user's preference)\n"
-                            f"   - Key invalidation points\n\n"
-                            f"4. Important Considerations\n"
-                            f"   - Potential catalysts\n"
-                            f"   - Key risks to watch\n"
-                            f"   - Timeframe alignment with user's preference\n"
-                            f"   - Funding rate implications"
-                        )
-                    except Exception as e:
-                        logger.error(f"Error generating trade setup: {str(e)}")
-                        await query.message.reply_text(
-                            "Sorry, I couldn't generate a trade setup at the moment. Please try again later.",
-                            reply_markup=MAIN_MENU
-                        )
-                        return
-                        
-                else:  # market analysis
+                if analysis_type == "market":
                     await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
                     try:
-                        response = await rei_call(
+                        logger.debug("Preparing market analysis prompt")
+                        prompt = (
                             f"Provide a comprehensive market analysis for {asset}, considering the user's profile."
                             f"{profile_context}\n\n"
                             f"Include:\n"
@@ -626,20 +597,28 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                             f"   - Correlation with market\n"
                             f"   - Suitability for user's risk profile"
                         )
+                        logger.debug("Calling REI API for market analysis")
+                        response = await rei_call(prompt)
+                        logger.info(f"Successfully received market analysis response of length: {len(response)}")
+                        await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
                     except Exception as e:
-                        logger.error(f"Error generating market analysis: {str(e)}")
+                        logger.error(f"Error generating market analysis: {str(e)}", exc_info=True)
                         await query.message.reply_text(
                             "Sorry, I couldn't generate the market analysis at the moment. Please try again later.",
                             reply_markup=MAIN_MENU
                         )
                         return
                         
-                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
-                
-            except ValueError:
-                logger.error(f"Invalid analysis value format: {value}")
+            except ValueError as e:
+                logger.error(f"Invalid analysis value format: {value}, error: {str(e)}")
                 await query.message.reply_text(
                     "Sorry, there was an error processing your request. Please try again.",
+                    reply_markup=MAIN_MENU
+                )
+            except Exception as e:
+                logger.error(f"Unexpected error in analysis handling: {str(e)}", exc_info=True)
+                await query.message.reply_text(
+                    "An unexpected error occurred. Please try again later.",
                     reply_markup=MAIN_MENU
                 )
             
