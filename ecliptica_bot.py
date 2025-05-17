@@ -226,98 +226,166 @@ async def fetch_top_volume_assets() -> List[str]:
         logging.error(f"Error fetching top assets: {e}")
         return ASSETS[:TOP_ASSETS_COUNT]  # Fallback to default assets
 
+# Set up logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the trade flow."""
+    logger.info("Starting trade flow")
+    
+    # Use consistent callback data format: action:asset
     buttons = [
-        [InlineKeyboardButton("📈 BTC-PERP", callback_data="btc")],
-        [InlineKeyboardButton("📈 ETH-PERP", callback_data="eth")],
-        [InlineKeyboardButton("🎯 Get Suggestion", callback_data="suggest")],
-        [InlineKeyboardButton("🔍 Custom Asset", callback_data="custom")]
+        [InlineKeyboardButton("BTC-PERP", callback_data="trade:BTC-PERP")],
+        [InlineKeyboardButton("ETH-PERP", callback_data="trade:ETH-PERP")],
+        [InlineKeyboardButton("Get Suggestion", callback_data="trade:SUGGEST")],
+        [InlineKeyboardButton("Custom Asset", callback_data="trade:CUSTOM")]
     ]
-    await update.message.reply_text(
-        "Choose an option:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    markup = InlineKeyboardMarkup(buttons)
+    logger.debug(f"Created markup with buttons: {[btn[0].callback_data for btn in buttons]}")
+    
+    try:
+        await update.message.reply_text(
+            "Choose an option:",
+            reply_markup=markup
+        )
+        logger.info("Sent trade options message")
+    except Exception as e:
+        logger.error(f"Error sending trade options: {str(e)}")
+        await update.message.reply_text(
+            "Sorry, there was an error. Please try again or contact support.",
+            reply_markup=MAIN_MENU
+        )
 
 async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button clicks."""
     query = update.callback_query
-    await query.answer()  # Required to acknowledge the callback
+    if not query:
+        logger.error("Received button_click call without callback query")
+        return
 
-    if query.data == "suggest":
-        await query.message.reply_text("🧠 Analyzing market conditions...")
-        suggestion = await rei_call("Suggest a high-probability trade setup")
-        await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+    logger.info(f"Received callback query with data: {query.data}")
     
-    elif query.data == "custom":
-        await query.message.reply_text("Enter asset symbol (e.g. BTC):")
-    
-    elif query.data in ["btc", "eth"]:
-        asset = query.data.upper() + "-PERP"
-        buttons = [
-            [InlineKeyboardButton("📊 Trade Setup", callback_data=f"{asset}_setup")],
-            [InlineKeyboardButton("📈 Analysis", callback_data=f"{asset}_analysis")]
-        ]
-        await query.message.edit_text(
-            f"What would you like to know about {asset}?",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-    
-    elif "_setup" in query.data:
-        asset = query.data.split("_")[0]
-        await query.message.reply_text(f"Generating trade setup for {asset}...")
-        setup = await rei_call(f"Provide a detailed trade setup for {asset}")
-        await query.message.reply_text(setup, parse_mode=ParseMode.MARKDOWN)
-    
-    elif "_analysis" in query.data:
-        asset = query.data.split("_")[0]
-        await query.message.reply_text(f"Analyzing {asset}...")
-        analysis = await rei_call(f"Provide technical analysis for {asset}")
-        await query.message.reply_text(analysis, parse_mode=ParseMode.MARKDOWN)
+    try:
+        # Always answer callback query first to prevent "loading" state
+        await query.answer()
+        
+        # Split callback data into action and value
+        if ":" not in query.data:
+            logger.error(f"Invalid callback data format: {query.data}")
+            await query.message.reply_text(
+                "Sorry, there was an error. Please try again.",
+                reply_markup=MAIN_MENU
+            )
+            return
+            
+        action, value = query.data.split(":", 1)
+        
+        if action == "trade":
+            if value == "SUGGEST":
+                logger.debug("Processing suggestion request")
+                await query.message.reply_text("🧠 Analyzing market conditions...")
+                suggestion = await rei_call("Suggest a high-probability trade setup")
+                await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+                
+            elif value == "CUSTOM":
+                logger.debug("Processing custom asset request")
+                await query.message.reply_text("Enter asset symbol (e.g. BTC):")
+                
+            elif value.endswith("-PERP"):
+                logger.debug(f"Processing {value} analysis options")
+                buttons = [
+                    [InlineKeyboardButton("Trade Setup", callback_data=f"analysis:setup:{value}")],
+                    [InlineKeyboardButton("Analysis", callback_data=f"analysis:market:{value}")]
+                ]
+                markup = InlineKeyboardMarkup(buttons)
+                await query.message.edit_text(
+                    f"What would you like to know about {value}?",
+                    reply_markup=markup
+                )
+                
+        elif action == "analysis":
+            analysis_type, asset = value.split(":", 1)
+            logger.debug(f"Processing {analysis_type} request for {asset}")
+            
+            await query.message.reply_text(f"Analyzing {asset}...")
+            
+            if analysis_type == "setup":
+                response = await rei_call(f"Provide a detailed trade setup for {asset}")
+            else:  # market analysis
+                response = await rei_call(f"Provide technical analysis for {asset}")
+                
+            await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+            
+        else:
+            logger.warning(f"Unknown action in callback: {action}")
+            await query.message.reply_text(
+                "Invalid option. Please try again.",
+                reply_markup=MAIN_MENU
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in button_click: {str(e)}", exc_info=True)
+        try:
+            await query.message.reply_text(
+                "An error occurred. Please try again or contact support.",
+                reply_markup=MAIN_MENU
+            )
+        except Exception as nested_e:
+            logger.error(f"Failed to send error message: {str(nested_e)}")
 
 # ───────────────────────────── main ─────────────────────────────────────── #
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    init_env(); init_db(); init_assets()
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(False).build()
+    """Start the bot."""
+    logger.info("Starting bot")
+    try:
+        # Initialize environment and database
+        init_env()
+        init_db()
+        init_assets()
+        
+        # Initialize bot
+        app = Application.builder().token(BOT_TOKEN).build()
+        logger.info("Bot application built")
 
-    # Start & main menu
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(MessageHandler(filters.Regex(r'^▶️ Start$'), main_menu))
-
-    # Main menu buttons
-    app.add_handler(MessageHandler(filters.Regex(r'^🔧 Setup Profile$'), setup_start))
-    app.add_handler(MessageHandler(filters.Regex(r'^📊 Trade$'), trade_start))
-    app.add_handler(MessageHandler(filters.Regex(r'^🤖 Ask AI$'), ask_cmd))
-    app.add_handler(MessageHandler(filters.Regex(r'^❓ FAQ$'), faq_cmd))
-    app.add_handler(CommandHandler('setup', setup_start))
-    app.add_handler(CommandHandler('trade', trade_start))
-    app.add_handler(CommandHandler('ask', ask_cmd))
-    app.add_handler(CommandHandler('faq', faq_cmd))
-    app.add_handler(CommandHandler('help', help_cmd))
-
-    # Setup conversation
-    app.add_handler(
-        ConversationHandler(
-            entry_points=[MessageHandler(filters.Regex(r'^🔧 Setup Profile$'), setup_start),
-                         CommandHandler('setup', setup_start)],
+        # Add conversation handler for setup
+        setup_handler = ConversationHandler(
+            entry_points=[
+                CommandHandler('setup', setup_start),
+                MessageHandler(filters.Regex('^🔧 Setup Profile$'), setup_start)
+            ],
             states={
-                SETUP: [
-                    CallbackQueryHandler(handle_setup),  # Remove pattern restriction to catch all callbacks
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, setup_start)
-                ]
+                SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
             },
             fallbacks=[CommandHandler('cancel', cancel)]
         )
-    )
+        
+        # Add handlers in specific order
+        app.add_handler(CommandHandler('start', start))
+        app.add_handler(MessageHandler(filters.Regex('^▶️ Start$'), main_menu))
+        app.add_handler(setup_handler)  # Add setup conversation handler
+        app.add_handler(CommandHandler('trade', trade_start))
+        app.add_handler(MessageHandler(filters.Regex('^📊 Trade$'), trade_start))
+        app.add_handler(CommandHandler('ask', ask_cmd))
+        app.add_handler(MessageHandler(filters.Regex('^🤖 Ask AI$'), ask_cmd))
+        app.add_handler(CommandHandler('faq', faq_cmd))
+        app.add_handler(MessageHandler(filters.Regex('^❓ FAQ$'), faq_cmd))
+        app.add_handler(CommandHandler('help', help_cmd))
+        
+        # Add general callback handler for trade and analysis actions
+        app.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
+        
+        logger.info("All handlers registered")
 
-    # Add a general callback query handler for debugging
-    app.add_handler(CallbackQueryHandler(handle_setup))
+        # Start polling
+        logger.info("Starting polling")
+        app.run_polling()
+        
+    except Exception as e:
+        logger.error(f"Error in main: {str(e)}", exc_info=True)
 
-    # Add trading conversation handler
-    app.add_handler(CallbackQueryHandler(button_click))
-    
-    app.run_polling()
-
-if __name__=='__main__':
+if __name__ == '__main__':
     main()
