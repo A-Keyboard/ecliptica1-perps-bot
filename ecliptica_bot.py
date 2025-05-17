@@ -41,7 +41,7 @@ ASSETS: List[str] = []
 token_lock = asyncio.Lock()
 
 # Conversation states
-(SETUP, SELECTING_ASSET, ANALYZING_ASSET) = range(3)
+(SETUP, SELECTING_ASSET, ANALYZING_ASSET, TRADING) = range(4)
 
 # Setup questions + options
 QUESTS: Final[List[tuple[str, str]]] = [
@@ -227,164 +227,90 @@ async def fetch_top_volume_assets() -> List[str]:
         return ASSETS[:TOP_ASSETS_COUNT]  # Fallback to default assets
 
 async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start the trade conversation and display asset options."""
+    """Start the trade conversation."""
     top_assets = await fetch_top_volume_assets()
     
-    buttons = []
+    keyboard = []
     for asset in top_assets:
-        buttons.append([InlineKeyboardButton(f"📈 {asset}", callback_data=asset)])
+        keyboard.append([{
+            'text': f"📈 {asset}",
+            'callback_data': 'A_' + asset
+        }])
     
-    buttons.extend([
-        [InlineKeyboardButton("🎯 Get Suggestion", callback_data="SUGGEST")],
-        [InlineKeyboardButton("🔍 Custom Asset", callback_data="CUSTOM")]
+    keyboard.extend([
+        [{'text': "🎯 Get Trade Suggestion", 'callback_data': 'B_SUGGEST'}],
+        [{'text': "🔍 Custom Asset", 'callback_data': 'B_CUSTOM'}]
     ])
     
-    markup = InlineKeyboardMarkup(buttons)
-    await update.message.reply_text(
-        "Choose an asset to analyze:",
-        reply_markup=markup
-    )
-    return SELECTING_ASSET
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(**btn) for btn in row] for row in keyboard])
+    await update.message.reply_text("Choose an asset:", reply_markup=reply_markup)
+    return TRADING
 
-async def handle_asset_selection(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle the asset selection."""
+async def handle_trading(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle all trading-related callbacks."""
     query = update.callback_query
-    await query.answer()
-    
-    if query.data == "SUGGEST":
-        return await handle_suggestion(update, ctx)
-    elif query.data == "CUSTOM":
-        await query.message.reply_text(
-            "Enter the asset symbol (e.g. BTC):\nI'll add -PERP automatically."
-        )
-        return ANALYZING_ASSET
-    else:
-        # Store the selected asset
-        ctx.user_data['asset'] = query.data
-        
-        # Show analysis options
-        buttons = [
-            [InlineKeyboardButton("📊 Trade Setup", callback_data="SETUP")],
-            [InlineKeyboardButton("📈 Technical Analysis", callback_data="ANALYSIS")]
-        ]
-        await query.message.edit_text(
-            f"What would you like to know about {query.data}?",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return ANALYZING_ASSET
-
-async def handle_analysis(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle the analysis type selection."""
-    query = update.callback_query
-    if query:
-        await query.answer()
-        if query.data == "SETUP":
-            await generate_trade_setup(query.message, ctx)
-        elif query.data == "ANALYSIS":
-            await provide_market_analysis(query.message, ctx)
-        return ConversationHandler.END
-    else:
-        # Handle custom asset input
+    if not query:
+        # Handle text input for custom asset
         asset = update.message.text.strip().upper()
         if not asset.endswith('-PERP'):
             asset = f"{asset}-PERP"
-        ctx.user_data['asset'] = asset
-        
-        buttons = [
-            [InlineKeyboardButton("📊 Trade Setup", callback_data="SETUP")],
-            [InlineKeyboardButton("📈 Technical Analysis", callback_data="ANALYSIS")]
+        keyboard = [
+            [{'text': "📊 Trade Setup", 'callback_data': f'C_SETUP_{asset}'}],
+            [{'text': "📈 Market Analysis", 'callback_data': f'C_ANALYSIS_{asset}'}]
         ]
-        await update.message.reply_text(
-            f"What would you like to know about {asset}?",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return ANALYZING_ASSET
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(**btn) for btn in row] for row in keyboard])
+        await update.message.reply_text(f"What would you like to know about {asset}?", reply_markup=reply_markup)
+        return TRADING
 
-async def handle_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle trade suggestion request."""
-    query = update.callback_query
-    with sqlite3.connect(DB) as con:
-        data = con.execute(
-            "SELECT data FROM profile WHERE uid=?",
-            (query.from_user.id,)
-        ).fetchone()
-    
-    if not data:
-        await query.message.reply_text(
-            "Please /setup your profile first for personalized suggestions."
-        )
-        return ConversationHandler.END
-    
-    profile = json.loads(data[0])
-    prompt = f"""Based on user profile:
-    - Experience: {profile.get('experience')}
-    - Risk: {profile.get('risk')}
-    - Timeframe: {profile.get('timeframe')}
-    - Leverage: {profile.get('leverage')}
-    
-    Suggest the best trading opportunity right now with:
-    1. Asset selection with reasoning
-    2. Entry zones with market context
-    3. Stop loss placement
-    4. Take profit targets
-    5. Key levels to watch
-    6. Risk management advice
-    """
-    
-    await query.message.reply_text("🧠 Analyzing market conditions...")
-    suggestion = await rei_call(prompt)
-    await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
-    return ConversationHandler.END
-
-async def generate_trade_setup(message: Message, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    asset = ctx.user_data.get('asset')
-    
-    # Get user profile for personalized setup
-    with sqlite3.connect(DB) as con:
-        data = con.execute("SELECT data FROM profile WHERE uid=?", 
-                          (message.chat.id,)).fetchone()
-    
-    if not data:
-        await message.reply_text(
-            "Please /setup your profile first for personalized trade setups."
-        )
-        return ConversationHandler.END
+    try:
+        await query.answer()
+        data = query.data
         
-    profile = json.loads(data[0])
-    prompt = f"""Given user profile:
-    - Experience: {profile.get('experience')}
-    - Risk: {profile.get('risk')}
-    - Timeframe: {profile.get('timeframe')}
-    - Leverage: {profile.get('leverage')}
-    
-    Provide a detailed trade setup for {asset} with:
-    1. Current market context
-    2. Entry zones with reasoning
-    3. Stop loss placement
-    4. Take profit targets
-    5. Key levels to watch
-    6. Risk management considerations
-    """
-    
-    await message.reply_text("🧠 Analyzing market conditions...")
-    setup = await rei_call(prompt)
-    await message.reply_text(setup, parse_mode=ParseMode.MARKDOWN)
-    return ConversationHandler.END
+        # Handle asset selection
+        if data.startswith('A_'):
+            asset = data[2:]  # Remove 'A_' prefix
+            keyboard = [
+                [{'text': "📊 Trade Setup", 'callback_data': f'C_SETUP_{asset}'}],
+                [{'text': "📈 Market Analysis", 'callback_data': f'C_ANALYSIS_{asset}'}]
+            ]
+            reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(**btn) for btn in row] for row in keyboard])
+            await query.message.edit_text(f"What would you like to know about {asset}?", reply_markup=reply_markup)
+            return TRADING
+            
+        # Handle suggestion/custom
+        elif data.startswith('B_'):
+            action = data[2:]  # Remove 'B_' prefix
+            if action == 'SUGGEST':
+                await query.message.reply_text("🧠 Analyzing market conditions...")
+                suggestion = await rei_call("Suggest a high-probability trade setup")
+                await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+                return ConversationHandler.END
+            elif action == 'CUSTOM':
+                await query.message.reply_text("Enter asset symbol (e.g. BTC):\nI'll add -PERP automatically.")
+                return TRADING
+                
+        # Handle analysis type
+        elif data.startswith('C_'):
+            parts = data[2:].split('_')  # Remove 'C_' prefix and split
+            action, asset = parts[0], parts[1]
+            
+            if action == 'SETUP':
+                await query.message.reply_text(f"Generating trade setup for {asset}...")
+                setup = await rei_call(f"Provide a detailed trade setup for {asset}")
+                await query.message.reply_text(setup, parse_mode=ParseMode.MARKDOWN)
+            elif action == 'ANALYSIS':
+                await query.message.reply_text(f"Analyzing {asset}...")
+                analysis = await rei_call(f"Provide technical analysis for {asset}")
+                await query.message.reply_text(analysis, parse_mode=ParseMode.MARKDOWN)
+            
+            return ConversationHandler.END
+            
+    except Exception as e:
+        logging.error(f"Error in handle_trading: {str(e)}")
+        await query.message.reply_text("An error occurred. Please try again.")
+        return ConversationHandler.END
 
-async def provide_market_analysis(message: Message, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    asset = ctx.user_data.get('asset')
-    prompt = f"""Provide a comprehensive market analysis for {asset} including:
-    1. Current trend and market structure
-    2. Key support and resistance levels
-    3. Important technical indicators
-    4. Recent price action analysis
-    5. Potential catalysts to watch
-    """
-    
-    await message.reply_text("🧠 Analyzing market conditions...")
-    analysis = await rei_call(prompt)
-    await message.reply_text(analysis, parse_mode=ParseMode.MARKDOWN)
-    return ConversationHandler.END
+    return TRADING
 
 # ───────────────────────────── main ─────────────────────────────────────── #
 def main() -> None:
@@ -425,26 +351,21 @@ def main() -> None:
     # Add a general callback query handler for debugging
     app.add_handler(CallbackQueryHandler(handle_setup))
 
-    # Add trade conversation handler
-    trade_conv_handler = ConversationHandler(
+    # Add trading conversation handler
+    app.add_handler(ConversationHandler(
         entry_points=[
             CommandHandler('trade', trade_start),
             MessageHandler(filters.Regex('^📊 Trade$'), trade_start)
         ],
         states={
-            SELECTING_ASSET: [
-                CallbackQueryHandler(handle_asset_selection)
-            ],
-            ANALYZING_ASSET: [
-                CallbackQueryHandler(handle_analysis),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_analysis)
+            TRADING: [
+                CallbackQueryHandler(handle_trading),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_trading)
             ]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
-    )
+    ))
     
-    app.add_handler(trade_conv_handler)
-
     app.run_polling()
 
 if __name__=='__main__':
