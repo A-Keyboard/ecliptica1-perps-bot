@@ -638,7 +638,8 @@ async def main() -> None:
             states={
                 SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
             },
-            fallbacks=[CommandHandler('cancel', cancel)]
+            fallbacks=[CommandHandler('cancel', cancel)],
+            per_message=True  # Add this line to fix the warning
         )
         
         # Add handlers in specific order
@@ -652,6 +653,7 @@ async def main() -> None:
         app.add_handler(CommandHandler('faq', faq_cmd))
         app.add_handler(MessageHandler(filters.Regex('^❓ FAQ$'), faq_cmd))
         app.add_handler(CommandHandler('help', help_cmd))
+        app.add_handler(CommandHandler('checkdb', check_db_cmd))
         
         # Add general callback handler for trade and analysis actions
         app.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
@@ -659,17 +661,24 @@ async def main() -> None:
         # Add handler for custom asset input
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
         
-        # Add admin command to check database contents
-        app.add_handler(CommandHandler('checkdb', check_db_cmd))
-        
         logger.info("All handlers registered")
 
         # Start polling
         logger.info("Starting polling")
-        await app.run_polling()
+        await app.initialize()  # Initialize first
+        await app.start()
+        await app.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
         logger.error(f"Error in main: {str(e)}", exc_info=True)
+    finally:
+        # Properly shutdown the application
+        try:
+            if 'app' in locals():
+                await app.stop()
+                await app.shutdown()
+        except Exception as e:
+            logger.error(f"Error during shutdown: {str(e)}")
 
 async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to check database contents"""
@@ -703,5 +712,14 @@ async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error checking database: {str(e)}")
         await update.message.reply_text("❌ Error checking database")
 
+def run_bot():
+    """Run the bot with proper asyncio handling"""
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot stopped due to error: {str(e)}", exc_info=True)
+
 if __name__ == '__main__':
-    asyncio.run(main())
+    run_bot()
