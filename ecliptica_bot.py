@@ -204,7 +204,7 @@ def init_assets() -> None:
 
 # ───────────────────────────── rei request ────────────────────────────────── #
 async def rei_call(prompt: str) -> str:
-    """Make an async call to REI API with better error handling."""
+    """Make an async call to REI API with better error handling and retry logic."""
     logger.info(f"Making REI API call with prompt: {prompt}")
     
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
@@ -220,59 +220,79 @@ async def rei_call(prompt: str) -> str:
     logger.debug(f"Request headers (excluding auth): {{'Content-Type': {headers['Content-Type']}}}")
     logger.debug(f"Request body: {json.dumps(body, indent=2)}")
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-            "https://api.reisearch.box/v1/chat/completions",
-                headers=headers,
-                json=body,
-                timeout=300
-            ) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"REI API error: Status {resp.status}, Response: {error_text}")
-                    if resp.status == 401:
-                        raise Exception("Invalid API key or unauthorized access")
-                    elif resp.status == 404:
-                        raise Exception("Agent not found")
-                    else:
-                        raise Exception(f"REI API returned status {resp.status}")
-                
-                try:
-                    data = await resp.json()
-                    logger.debug(f"API Response: {json.dumps(data, indent=2)}")
-                except json.JSONDecodeError as e:
-                    raw_response = await resp.text()
-                    logger.error(f"Failed to parse JSON response. Raw response: {raw_response}")
-                    raise
-                
-                if not data.get("choices") or not data["choices"][0].get("message"):
-                    logger.error(f"Unexpected REI API response format: {data}")
-                    raise Exception("Invalid response format from REI API")
-                
-                message = data["choices"][0]["message"]
-                if message.get("tool_calls"):
-                    # Handle tool calls if present
-                    logger.error(f"Received tool calls in response, which we don't support: {message['tool_calls']}")
-                    raise Exception("Received tool calls response which is not supported")
-                
-                if not message.get("content"):
-                    logger.error(f"No content in message: {message}")
-                    raise Exception("No content in API response")
+    # Retry parameters
+    max_retries = 2
+    retry_count = 0
+    last_error = None
+    
+    while retry_count <= max_retries:
+        try:
+            # Use a longer timeout (600 seconds = 10 minutes)
+            logger.info(f"REI API call attempt {retry_count + 1}/{max_retries + 1}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                "https://api.reisearch.box/v1/chat/completions",
+                    headers=headers,
+                    json=body,
+                    timeout=600  # Increased from 300 to 600 seconds
+                ) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        logger.error(f"REI API error: Status {resp.status}, Response: {error_text}")
+                        if resp.status == 401:
+                            raise Exception("Invalid API key or unauthorized access")
+                        elif resp.status == 404:
+                            raise Exception("Agent not found")
+                        else:
+                            raise Exception(f"REI API returned status {resp.status}")
                     
-                content = message["content"].strip()
-                logger.info(f"Successfully received response of length: {len(content)}")
-                return content
-                
-    except aiohttp.ClientError as e:
-        logger.error(f"Network error calling REI API: {str(e)}")
-        raise Exception(f"Network error: {str(e)}")
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON response from REI API: {str(e)}")
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error in rei_call: {str(e)}", exc_info=True)
-        raise
+                    try:
+                        data = await resp.json()
+                        logger.debug(f"API Response: {json.dumps(data, indent=2)}")
+                    except json.JSONDecodeError as e:
+                        raw_response = await resp.text()
+                        logger.error(f"Failed to parse JSON response. Raw response: {raw_response}")
+                        raise
+                    
+                    if not data.get("choices") or not data["choices"][0].get("message"):
+                        logger.error(f"Unexpected REI API response format: {data}")
+                        raise Exception("Invalid response format from REI API")
+                    
+                    message = data["choices"][0]["message"]
+                    if message.get("tool_calls"):
+                        # Handle tool calls if present
+                        logger.error(f"Received tool calls in response, which we don't support: {message['tool_calls']}")
+                        raise Exception("Received tool calls response which is not supported")
+                    
+                    if not message.get("content"):
+                        logger.error(f"No content in message: {message}")
+                        raise Exception("No content in API response")
+                        
+                    content = message["content"].strip()
+                    logger.info(f"Successfully received response of length: {len(content)}")
+                    return content
+                    
+        except asyncio.TimeoutError as e:
+            logger.error(f"Timeout error on attempt {retry_count + 1}: {str(e)}")
+            last_error = e
+            retry_count += 1
+            if retry_count <= max_retries:
+                logger.info(f"Retrying in 5 seconds...")
+                await asyncio.sleep(5)  # Wait before retrying
+            continue
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error calling REI API: {str(e)}")
+            raise Exception(f"Network error: {str(e)}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON response from REI API: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in rei_call: {str(e)}", exc_info=True)
+            raise
+    
+    # If we get here, all retries failed
+    logger.error(f"All {max_retries + 1} attempts failed. Last error: {str(last_error)}")
+    raise Exception(f"Failed to get response after {max_retries + 1} attempts: {str(last_error)}")
 
 # ───────────────────────────── telegram callbacks ────────────────────────── #
 INIT_MENU = ReplyKeyboardMarkup(
