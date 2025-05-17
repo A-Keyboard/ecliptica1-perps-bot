@@ -1,0 +1,1 @@
+worker: python ecliptica_bot.py 
