@@ -394,13 +394,14 @@ async def create_subscription(user_id: int, plan_type: str, payment_id: str = No
         plan = None
         if plan_type in SUBSCRIPTION_PLANS:
             plan = SUBSCRIPTION_PLANS[plan_type]
+            logger.info(f"Creating subscription for plan: {plan_type}")
         elif promo_code and promo_code in PROMO_CODES:
             # For promo codes, create a custom plan
             promo = PROMO_CODES[promo_code]
             plan = {"days": promo["days"]}
             plan_type = "promo"
-            
-        if not plan:
+            logger.info(f"Creating subscription with promo code: {promo_code}, days: {promo['days']}")
+        else:
             logging.error(f"Invalid plan type or promo code: {plan_type} / {promo_code}")
             return False
             
@@ -408,6 +409,8 @@ async def create_subscription(user_id: int, plan_type: str, payment_id: str = No
         now = datetime.now(timezone.utc)
         days = plan["days"]
         end_date = now + timedelta(days=days)
+        
+        logger.info(f"Setting up subscription for user {user_id} from {now} to {end_date}")
         
         async with db_pool.acquire() as conn:
             # Check if subscription already exists
@@ -418,6 +421,7 @@ async def create_subscription(user_id: int, plan_type: str, payment_id: str = No
             
             if existing:
                 # Update existing subscription
+                logger.info(f"Updating existing subscription for user {user_id}")
                 await conn.execute(
                     '''
                     UPDATE subscriptions
@@ -429,6 +433,7 @@ async def create_subscription(user_id: int, plan_type: str, payment_id: str = No
                 )
             else:
                 # Create new subscription
+                logger.info(f"Creating new subscription for user {user_id}")
                 await conn.execute(
                     '''
                     INSERT INTO subscriptions
@@ -438,7 +443,22 @@ async def create_subscription(user_id: int, plan_type: str, payment_id: str = No
                     user_id, plan_type, now, end_date, payment_id, promo_code
                 )
                 
-            return True
+            # Verify the subscription was created/updated correctly
+            subscription = await conn.fetchrow(
+                '''
+                SELECT uid, plan_type, start_date, end_date, payment_id, status, promo_code
+                FROM subscriptions
+                WHERE uid = $1
+                ''',
+                user_id
+            )
+            
+            if subscription:
+                logger.info(f"Subscription confirmed for user {user_id}: {dict(subscription)}")
+                return True
+            else:
+                logger.error(f"Failed to verify subscription for user {user_id}")
+                return False
             
     except Exception as e:
         logging.error(f"Error creating subscription: {str(e)}")
@@ -590,7 +610,7 @@ async def create_payment_charge(user_id: int, plan_type: str) -> tuple[bool, str
 
 async def verify_promo_code(code: str) -> bool:
     """Verify if a promo code is valid."""
-    return code.upper() in PROMO_CODES
+    return code.strip().upper() in PROMO_CODES
 
 # Add cache to store responses
 RESPONSE_CACHE = {}  # Format: {asset: {"response": str, "timestamp": datetime, "type": "market|setup"}}
@@ -1013,13 +1033,24 @@ async def handle_code_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> i
     code = update.message.text.strip().upper()
     user_id = update.effective_user.id
     
+    logger.info(f"User {user_id} entered promo code: {code}")
+    
     # Verify the code
-    if await verify_promo_code(code):
+    is_valid = await verify_promo_code(code)
+    logger.info(f"Promo code valid: {is_valid}")
+    
+    if is_valid:
         # Valid code, create subscription
         promo_details = PROMO_CODES[code]
+        logger.info(f"Creating subscription with promo code {code}")
         success = await create_subscription(user_id, None, None, code)
+        logger.info(f"Subscription creation success: {success}")
         
         if success:
+            # Double-check that subscription was created
+            subscription = await get_user_subscription(user_id)
+            logger.info(f"Subscription after creation: {subscription}")
+            
             await update.message.reply_text(
                 f"✅ Success! Your promo code *{code}* has been activated.\n\n"
                 f"You now have *{promo_details['days']} days* of free access to all premium features.\n\n"
@@ -1968,12 +1999,54 @@ def init_handlers(application: Application) -> None:
     application.add_handler(MessageHandler(filters.Regex('^❓ FAQ$'), faq_cmd))
     application.add_handler(CommandHandler('help', help_cmd))
     application.add_handler(CommandHandler('checkdb', check_db_cmd))
+    application.add_handler(CommandHandler('debug', debug_cmd))
     application.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
     application.add_handler(CallbackQueryHandler(handle_subscription_callback, pattern=r'^sub:'))
     
     # Add the custom asset handler as the LAST handler
     # It should only receive messages that aren't caught by any of the above handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
+
+async def debug_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to check user subscription status"""
+    user_id = update.effective_user.id
+    
+    # Check subscription status
+    subscription = await get_user_subscription(user_id)
+    if subscription:
+        # Format subscription details
+        subscription_details = f"Found subscription record:\n"
+        for key, value in subscription.items():
+            subscription_details += f"• {key}: {value}\n"
+    else:
+        subscription_details = "No subscription record found."
+    
+    # Check access
+    has_access, message = await check_subscription_access(user_id)
+    access_status = f"Access check: {has_access}, Message: {message}"
+    
+    # Database check
+    db_status = "Connected" if db_pool else "Not connected"
+    
+    # Combined status
+    response = f"""
+🧪 *Debug Information*
+
+*User ID:* `{user_id}`
+*Database:* {db_status}
+
+*Access Status:* 
+{access_status}
+
+*Subscription Details:*
+{subscription_details}
+
+*Promo Codes:*
+{', '.join(PROMO_CODES.keys())}
+"""
+    
+    # Send the debug info
+    await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
 
 async def post_init(application: Application) -> None:
     """Post-initialization tasks."""
