@@ -497,7 +497,20 @@ async def check_subscription_access(user_id: int) -> tuple[bool, str]:
     
     if subscription and subscription['is_active']:
         # User has an active subscription
-        return True, ""
+        if subscription['promo_code']:
+            # If it's a promo code subscription, show which one they're using
+            promo_code = subscription['promo_code']
+            days_left = subscription['days_remaining']
+            
+            if promo_code == "UNLIMITED2024":
+                return True, f"You have unlimited access with promo code {promo_code}."
+            else:
+                return True, f"You have {days_left} days left with promo code {promo_code}."
+        else:
+            # Regular paid subscription
+            plan_type = subscription.get('plan_type', 'subscription')
+            days_left = subscription['days_remaining']
+            return True, f"You have an active {plan_type} subscription with {days_left} days remaining."
         
     # Check usage count for free tier
     if subscription:
@@ -909,11 +922,21 @@ async def subscription_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         
         if subscription['promo_code']:
             # This is a promo subscription
-            await update.message.reply_text(
-                f"✅ You currently have an active subscription using promo code *{subscription['promo_code']}*.\n\n"
-                f"Your subscription expires in *{days_remaining} days*.",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            promo_code = subscription['promo_code']
+            
+            if promo_code == "UNLIMITED2024":
+                await update.message.reply_text(
+                    f"✅ You currently have *UNLIMITED ACCESS* using promo code *{promo_code}*.\n\n"
+                    f"This code provides you with 10 years of access to all premium features.\n\n"
+                    f"*Remaining days:* {days_remaining}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    f"✅ You currently have an active subscription using promo code *{subscription['promo_code']}*.\n\n"
+                    f"Your subscription expires in *{days_remaining} days*.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
         else:
             # Paid subscription
             plan_name = SUBSCRIPTION_PLANS.get(plan_type, {}).get('name', 'Custom Plan')
@@ -1597,15 +1620,15 @@ async def handle_market_analysis(query, asset, profile_context, profile):
             )
             return
             
+        # Show subscription status message (always show this)
+        if message:
+            await query.message.reply_text(f"ℹ️ {message}")
+            
         # Increment usage count if not on a paid plan
         subscription = await get_user_subscription(user_id)
         if not subscription or not subscription['is_active']:
             count = await increment_usage_count(user_id)
             logger.info(f"User {user_id} analysis count incremented to {count}")
-            
-            # Show free tier message if applicable
-            if message:
-                await query.message.reply_text(f"ℹ️ {message}")
         
         # Show waiting state with specific message for this analysis
         await show_waiting_state(query, f"📊 Analyzing {asset} market conditions... (this may take a minute)")
@@ -1713,15 +1736,16 @@ async def handle_trade_setup(query, asset, profile_context, profile):
                 reply_markup=markup
             )
             return
+        
+        # Show subscription status message (always show this)
+        if message:
+            await query.message.reply_text(f"ℹ️ {message}")
             
         # Increment usage if needed
         subscription = await get_user_subscription(user_id)
         if not subscription or not subscription['is_active']:
             count = await increment_usage_count(user_id)
             logger.info(f"User {user_id} analysis count incremented to {count}")
-            
-            if message:
-                await query.message.reply_text(f"ℹ️ {message}")
             
         # Show waiting state with specific message for this setup
         await show_waiting_state(query, f"🎯 Generating trade setup for {asset}... (this may take a minute)")
