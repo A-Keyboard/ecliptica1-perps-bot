@@ -34,6 +34,9 @@ from telegram.ext import (
 )
 import aiohttp
 import asyncpg
+import traceback
+import sys
+import signal
 
 # Set up logging first
 logging.basicConfig(
@@ -41,6 +44,32 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Add file handler to also log to a file
+try:
+    file_handler = logging.FileHandler('bot.log')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    logger.info("File logging initialized")
+except Exception as e:
+    logger.error(f"Failed to set up file logging: {str(e)}")
+
+# Add a signal handler for debugging deadlocks
+def timeout_handler(signum, frame):
+    current_stack = ''.join(traceback.format_stack())
+    logger.critical(f"WATCHDOG TIMEOUT! Process appears stuck. Current stack:\n{current_stack}")
+    # Log to stderr as well to ensure it appears in Railway logs
+    print(f"CRITICAL: WATCHDOG TIMEOUT! Process appears stuck. Current stack:\n{current_stack}", file=sys.stderr)
+    
+# Set up a watchdog timer for 2 minutes (will be reset on each command)
+def start_watchdog():
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(120)  # 2 minutes
+    
+def stop_watchdog():
+    signal.alarm(0)
 
 # ───────────────────────────── configuration ────────────────────────────────── #
 ASSETS: List[str] = []
@@ -206,40 +235,57 @@ def init_assets() -> None:
 async def rei_call(prompt: str) -> str:
     """Make an async call to REI API with better error handling, retry logic, and chunking for long prompts."""
     logger.info(f"Making REI API call with prompt length: {len(prompt)}")
+    print(f"STDOUT: Making REI API call with prompt length: {len(prompt)}", file=sys.stdout)
+    print(f"STDERR: Making REI API call with prompt length: {len(prompt)}", file=sys.stderr)
     
-    # Check if prompt is very long
-    if len(prompt) > 2000:
-        logger.info("Long prompt detected, splitting request into context and questions")
-        
-        # Split the prompt into context and questions
-        parts = prompt.split("Include:")
-        if len(parts) == 2:
-            context = parts[0].strip()
-            questions = "Include:" + parts[1].strip()
+    # Start watchdog timer
+    start_watchdog()
+    
+    try:
+        # Check if prompt is very long
+        if len(prompt) > 2000:
+            logger.info("Long prompt detected, splitting request into context and questions")
             
-            logger.info(f"Splitting prompt: context length {len(context)}, questions length {len(questions)}")
-            
-            # Make the first call with just the context to prime the model
-            logger.info("Making initial context call")
-            try:
-                context_response = await _rei_call_internal(
-                    f"{context}\n\nPlease confirm you understand this context and are ready for questions.",
-                    max_tokens=100
+            # Split the prompt into context and questions
+            parts = prompt.split("Include:")
+            if len(parts) == 2:
+                context = parts[0].strip()
+                questions = "Include:" + parts[1].strip()
+                
+                logger.info(f"Splitting prompt: context length {len(context)}, questions length {len(questions)}")
+                
+                # Make the first call with just the context to prime the model
+                logger.info("Making initial context call")
+                try:
+                    context_response = await _rei_call_internal(
+                        f"{context}\n\nPlease confirm you understand this context and are ready for questions.",
+                        max_tokens=100
+                    )
+                    logger.info(f"Context call successful: {context_response[:50]}...")
+                except Exception as e:
+                    logger.error(f"Context call failed: {str(e)}")
+                    # Continue anyway to the main call
+                
+                # Now make the main call with reference to the context
+                logger.info("Making main call with questions")
+                result = await _rei_call_internal(
+                    f"Using the context I provided earlier about {context[:50]}...\n\n{questions}", 
+                    max_tokens=4000
                 )
-                logger.info(f"Context call successful: {context_response[:50]}...")
-            except Exception as e:
-                logger.error(f"Context call failed: {str(e)}")
-                # Continue anyway to the main call
+                # Stop watchdog timer as we're done
+                stop_watchdog()
+                return result
             
-            # Now make the main call with reference to the context
-            logger.info("Making main call with questions")
-            return await _rei_call_internal(
-                f"Using the context I provided earlier about {context[:50]}...\n\n{questions}", 
-                max_tokens=4000
-            )
-        
-    # For shorter prompts, just make a regular call
-    return await _rei_call_internal(prompt)
+        # For shorter prompts, just make a regular call
+        result = await _rei_call_internal(prompt)
+        # Stop watchdog timer as we're done
+        stop_watchdog()
+        return result
+    except Exception as e:
+        # Make sure to stop the watchdog if we hit an exception
+        stop_watchdog()
+        logger.error(f"rei_call failed with exception: {str(e)}", exc_info=True)
+        raise
 
 async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
     """Internal implementation of the REI API call with retries."""
@@ -263,55 +309,86 @@ async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
     
     while retry_count <= max_retries:
         try:
+            # Reset watchdog timer for this attempt
+            start_watchdog()
+            
             # Use a timeout of 90 seconds to stay under Cloudflare's ~100 second limit
             logger.info(f"REI API call attempt {retry_count + 1}/{max_retries + 1}")
+            print(f"STDOUT: REI API call attempt {retry_count + 1}/{max_retries + 1}", file=sys.stdout)
+            print(f"STDERR: REI API call attempt {retry_count + 1}/{max_retries + 1}", file=sys.stderr)
+            
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                "https://api.reisearch.box/v1/chat/completions",
-                    headers=headers,
-                    json=body,
-                    timeout=90  # Reduced from 600 to 90 seconds to avoid Cloudflare timeout
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        logger.error(f"REI API error: Status {resp.status}, Response: {error_text}")
-                        if resp.status == 401:
-                            raise Exception("Invalid API key or unauthorized access")
-                        elif resp.status == 404:
-                            raise Exception("Agent not found")
-                        elif resp.status == 524:
-                            raise Exception(f"Cloudflare timeout (524) - origin server took too long to respond")
-                        else:
-                            raise Exception(f"REI API returned status {resp.status}")
+                # Create a task for the post request to be able to add a shield
+                post_task = asyncio.create_task(
+                    session.post(
+                        "https://api.reisearch.box/v1/chat/completions",
+                        headers=headers,
+                        json=body,
+                        timeout=90  # Reduced to 90 seconds to avoid Cloudflare timeout
+                    )
+                )
+                
+                # Use shield to ensure task continues running even if waiting coroutine is cancelled
+                shielded_task = asyncio.shield(post_task)
+                
+                try:
+                    # Wait for the response with timeout
+                    resp = await asyncio.wait_for(shielded_task, timeout=95)
+                except asyncio.TimeoutError:
+                    # Cancel the task if it times out
+                    if not post_task.done():
+                        post_task.cancel()
+                    raise
+                
+                # Process the response
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"REI API error: Status {resp.status}, Response: {error_text}")
+                    print(f"STDERR: REI API error: Status {resp.status}, Response: {error_text}", file=sys.stderr)
+                    if resp.status == 401:
+                        raise Exception("Invalid API key or unauthorized access")
+                    elif resp.status == 404:
+                        raise Exception("Agent not found")
+                    elif resp.status == 524:
+                        raise Exception(f"Cloudflare timeout (524) - origin server took too long to respond")
+                    else:
+                        raise Exception(f"REI API returned status {resp.status}")
+                
+                try:
+                    data = await resp.json()
+                    logger.debug(f"API Response: {json.dumps(data, indent=2)}")
+                except json.JSONDecodeError as e:
+                    raw_response = await resp.text()
+                    logger.error(f"Failed to parse JSON response. Raw response: {raw_response}")
+                    raise
+                
+                if not data.get("choices") or not data["choices"][0].get("message"):
+                    logger.error(f"Unexpected REI API response format: {data}")
+                    raise Exception("Invalid response format from REI API")
+                
+                message = data["choices"][0]["message"]
+                if message.get("tool_calls"):
+                    # Handle tool calls if present
+                    logger.error(f"Received tool calls in response, which we don't support: {message['tool_calls']}")
+                    raise Exception("Received tool calls response which is not supported")
+                
+                if not message.get("content"):
+                    logger.error(f"No content in message: {message}")
+                    raise Exception("No content in API response")
                     
-                    try:
-                        data = await resp.json()
-                        logger.debug(f"API Response: {json.dumps(data, indent=2)}")
-                    except json.JSONDecodeError as e:
-                        raw_response = await resp.text()
-                        logger.error(f"Failed to parse JSON response. Raw response: {raw_response}")
-                        raise
-                    
-                    if not data.get("choices") or not data["choices"][0].get("message"):
-                        logger.error(f"Unexpected REI API response format: {data}")
-                        raise Exception("Invalid response format from REI API")
-                    
-                    message = data["choices"][0]["message"]
-                    if message.get("tool_calls"):
-                        # Handle tool calls if present
-                        logger.error(f"Received tool calls in response, which we don't support: {message['tool_calls']}")
-                        raise Exception("Received tool calls response which is not supported")
-                    
-                    if not message.get("content"):
-                        logger.error(f"No content in message: {message}")
-                        raise Exception("No content in API response")
-                        
-                    content = message["content"].strip()
-                    logger.info(f"Successfully received response of length: {len(content)}")
-                    return content
-                    
+                content = message["content"].strip()
+                logger.info(f"Successfully received response of length: {len(content)}")
+                print(f"STDOUT: Successfully received response of length: {len(content)}", file=sys.stdout)
+                
+                # Stop watchdog for this attempt since we succeeded
+                stop_watchdog()
+                return content
+                
         except asyncio.TimeoutError as e:
+            # Reset the watchdog timer since we've handled the timeout
+            stop_watchdog()
             logger.error(f"Timeout error on attempt {retry_count + 1}: {str(e)}")
+            print(f"STDERR: Timeout error on attempt {retry_count + 1}: {str(e)}", file=sys.stderr)
             last_error = e
             retry_count += 1
             if retry_count <= max_retries:
@@ -319,15 +396,24 @@ async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
                 await asyncio.sleep(5)  # Wait before retrying
             continue
         except aiohttp.ClientError as e:
+            # Reset the watchdog timer
+            stop_watchdog()
             logger.error(f"Network error calling REI API: {str(e)}")
+            print(f"STDERR: Network error calling REI API: {str(e)}", file=sys.stderr)
             raise Exception(f"Network error: {str(e)}")
         except json.JSONDecodeError as e:
+            # Reset the watchdog timer
+            stop_watchdog()
             logger.error(f"Invalid JSON response from REI API: {str(e)}")
+            print(f"STDERR: Invalid JSON response from REI API: {str(e)}", file=sys.stderr)
             raise
         except Exception as e:
+            # Reset the watchdog timer
+            stop_watchdog()
             # Check if it's a Cloudflare timeout error
             if "524" in str(e):
                 logger.warning(f"Cloudflare timeout detected on attempt {retry_count + 1}")
+                print(f"STDERR: Cloudflare timeout detected on attempt {retry_count + 1}", file=sys.stderr)
                 last_error = e
                 retry_count += 1
                 if retry_count <= max_retries:
@@ -340,10 +426,12 @@ async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
                     await asyncio.sleep(5)
                 continue
             logger.error(f"Unexpected error in rei_call: {str(e)}", exc_info=True)
+            print(f"STDERR: Unexpected error in rei_call: {str(e)}", file=sys.stderr)
             raise
     
     # If we get here, all retries failed
     logger.error(f"All {max_retries + 1} attempts failed. Last error: {str(last_error)}")
+    print(f"STDERR: All {max_retries + 1} attempts failed. Last error: {str(last_error)}", file=sys.stderr)
     raise Exception(f"Failed to get response after {max_retries + 1} attempts: {str(last_error)}")
 
 # ───────────────────────────── telegram callbacks ────────────────────────── #
@@ -542,6 +630,34 @@ async def format_profile_context(profile: dict) -> str:
         f"- Funding Rate Preference: {profile.get('funding', 'unknown')}\n"
     )
 
+# Add a fallback response function
+def get_fallback_response(asset: str = "", analysis_type: str = "") -> str:
+    """Generate a simple fallback response when the REI API fails."""
+    if not asset:
+        return ("I'm currently experiencing issues connecting to my analysis service. "
+                "Please try again in a few minutes. If the issue persists, consider using a simpler request.")
+    
+    if analysis_type == "market":
+        return (f"I'm sorry, I couldn't retrieve a full market analysis for {asset} at the moment due to technical issues. "
+                f"Some key points about {asset} to consider:\n\n"
+                f"• Check the current price and 24h change on your preferred exchange\n"
+                f"• Look at the daily timeframe for major support/resistance levels\n"
+                f"• Monitor funding rates if taking a leveraged position\n"
+                f"• Consider overall market sentiment and correlation with BTC\n\n"
+                f"Please try again later for a more detailed analysis.")
+    elif analysis_type == "setup":
+        return (f"I'm sorry, I couldn't generate a complete trade setup for {asset} at this time due to technical issues. "
+                f"For a basic approach to trading {asset}:\n\n"
+                f"• Look for key support/resistance levels on the 4h and daily charts\n"
+                f"• Consider setting stops 2-5% below your entry (based on your risk profile)\n"
+                f"• Target profit taking at previous resistance levels\n"
+                f"• Always manage your position size based on your risk tolerance\n\n"
+                f"Please try again later for a more detailed trade setup.")
+    else:
+        return (f"I'm having trouble connecting to my analysis service to provide information about {asset}. "
+                f"Please try again in a few minutes, or try a different request.")
+
+# Now update the button_click handler to use the fallback function for analysis failures 
 async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button clicks."""
     query = update.callback_query
@@ -638,12 +754,14 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                             end_time = datetime.now()
                             duration = (end_time - start_time).total_seconds()
                             logger.error(f"REI API call failed after {duration} seconds with error: {str(api_e)}")
-                            raise api_e
+                            # Use fallback response
+                            logger.info(f"Using fallback response for {asset} market analysis")
+                            response = get_fallback_response(asset, "market")
                             
                         end_time = datetime.now()
                         duration = (end_time - start_time).total_seconds()
-                        logger.info(f"REI API call completed successfully in {duration} seconds")
-                        logger.info(f"Successfully received market analysis response of length: {len(response)}")
+                        logger.info(f"REI API call completed in {duration} seconds")
+                        logger.info(f"Got response of length: {len(response)}")
                         
                         # Split response into chunks if too long
                         if len(response) > 4096:
@@ -667,80 +785,9 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                                 await query.message.reply_text(response)
                                 
                     except Exception as e:
-                        logger.error(f"Error generating market analysis: {str(e)}", exc_info=True)
+                        logger.error(f"Error in market analysis flow: {str(e)}", exc_info=True)
                         await query.message.reply_text(
-                            "Sorry, I couldn't generate the market analysis at the moment. Please try again later.",
-                            reply_markup=MAIN_MENU
-                        )
-                        return
-                        
-                elif analysis_type == "setup":
-                    await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
-                    try:
-                        logger.debug("Preparing trade setup prompt")
-                        start_time = datetime.now()
-                        logger.debug(f"Starting REI API call at {start_time}")
-                        
-                        try:
-                            response = await rei_call(
-                                f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
-                                f"{profile_context}\n\n"
-                                f"Include:\n"
-                                f"1. Current Market Context\n"
-                                f"   - Price action summary\n"
-                                f"   - Key levels in play\n"
-                                f"   - Market structure\n\n"
-                                f"2. Trade Setup Details\n"
-                                f"   - Entry zone/price with reasoning\n"
-                                f"   - Stop loss placement and rationale\n"
-                                f"   - Take profit targets (multiple levels)\n"
-                                f"   - Position sizing based on user's capital and risk\n\n"
-                                f"3. Risk Management\n"
-                                f"   - Risk:reward ratio\n"
-                                f"   - Maximum risk per trade (based on user's preference)\n"
-                                f"   - Key invalidation points\n\n"
-                                f"4. Important Considerations\n"
-                                f"   - Potential catalysts\n"
-                                f"   - Key risks to watch\n"
-                                f"   - Timeframe alignment with user's preference\n"
-                                f"   - Funding rate implications"
-                            )
-                        except Exception as api_e:
-                            end_time = datetime.now()
-                            duration = (end_time - start_time).total_seconds()
-                            logger.error(f"REI API call failed after {duration} seconds with error: {str(api_e)}")
-                            raise api_e
-                            
-                        end_time = datetime.now()
-                        duration = (end_time - start_time).total_seconds()
-                        logger.info(f"REI API call completed successfully in {duration} seconds")
-                        logger.info(f"Successfully received trade setup response of length: {len(response)}")
-                        
-                        # Split response into chunks if too long
-                        if len(response) > 4096:
-                            logger.debug("Response too long, splitting into chunks")
-                            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
-                            for i, chunk in enumerate(chunks):
-                                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
-                                try:
-                                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
-                                except Exception as chunk_e:
-                                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
-                                    # If markdown fails, try sending without parsing
-                                    await query.message.reply_text(chunk)
-                        else:
-                            logger.debug("Sending single response message")
-                            try:
-                                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
-                            except Exception as send_e:
-                                logger.error(f"Error sending response with markdown: {str(send_e)}")
-                                # If markdown fails, try sending without parsing
-                                await query.message.reply_text(response)
-                                
-                    except Exception as e:
-                        logger.error(f"Error generating trade setup: {str(e)}", exc_info=True)
-                        await query.message.reply_text(
-                            "Sorry, I couldn't generate a trade setup at the moment. Please try again later.",
+                            get_fallback_response(asset, "market"),
                             reply_markup=MAIN_MENU
                         )
                         return
