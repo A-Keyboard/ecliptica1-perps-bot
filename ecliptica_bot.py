@@ -1,14 +1,15 @@
-# ecliptica_bot.py — v0.6.18
+# ecliptica_bot.py — v0.6.19
 """
 Ecliptica Perps Assistant — Telegram trading bot with guided /trade flow, interactive setup via buttons, suggestions, and formatted AI responses
 
-v0.6.18
+v0.6.19
 ──────
-• Restored interactive buttons for setup questions
-• Added InlineKeyboardMarkup in ask_next/handle_setup
+• Switched from SQLite to PostgreSQL for Railway deployment
+• Added async database operations
+• Improved error handling for database operations
 """
 from __future__ import annotations
-import os, json, sqlite3, logging, textwrap, asyncio, requests
+import os, json, logging, textwrap, asyncio, requests
 from datetime import datetime, timezone, timedelta
 from typing import Final, List, Dict
 from dotenv import load_dotenv
@@ -32,10 +33,13 @@ from telegram.ext import (
     filters,
 )
 import aiohttp
+import asyncpg
 
 # ───────────────────────────── configuration ────────────────────────────────── #
-DB: Final[str] = "ecliptica.db"
 ASSETS: List[str] = []
+
+# Database pool
+db_pool = None
 
 # Serialize REI calls across users
 token_lock = asyncio.Lock()
@@ -74,11 +78,85 @@ def init_env() -> None:
     REI_KEY   = os.environ.get("REICORE_API_KEY",     "").strip()
 
 # ───────────────────────────── database ────────────────────────────────────── #
-def init_db() -> None:
-    with sqlite3.connect(DB) as con:
-        con.execute("CREATE TABLE IF NOT EXISTS profile (uid INTEGER PRIMARY KEY, data TEXT)")
-        con.execute("CREATE TABLE IF NOT EXISTS sub     (uid INTEGER PRIMARY KEY, exp  TEXT)")
-    logging.info("Initialized database tables")
+async def init_db() -> None:
+    """Initialize PostgreSQL database connection pool"""
+    global db_pool
+    try:
+        # Get database URL from Railway
+        database_url = os.environ.get('POSTGRES_URL')
+        logger.info("Attempting database connection...")
+        
+        if not database_url:
+            logger.error("POSTGRES_URL environment variable not set!")
+            raise Exception("POSTGRES_URL not set")
+            
+        # Create connection pool
+        logger.info("Creating database pool...")
+        db_pool = await asyncpg.create_pool(database_url)
+        logger.info("Database pool created successfully")
+        
+        # Create tables if they don't exist
+        async with db_pool.acquire() as conn:
+            logger.info("Creating tables if they don't exist...")
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS profile (
+                    uid BIGINT PRIMARY KEY,
+                    data JSONB
+                )
+            ''')
+            # Verify table was created
+            table_exists = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'profile')"
+            )
+            if table_exists:
+                logger.info("Profile table exists and is ready")
+                # Count existing profiles
+                count = await conn.fetchval('SELECT COUNT(*) FROM profile')
+                logger.info(f"Current number of profiles in database: {count}")
+            else:
+                logger.error("Failed to create profile table!")
+                
+        logger.info("Database initialization completed successfully")
+    except Exception as e:
+        logger.error(f"Database initialization error: {str(e)}")
+        logger.error("Database URL format (censored): " + database_url[:10] + "..." if database_url else "None")
+        raise
+
+async def get_user_profile(user_id: int) -> dict:
+    """Get user profile from database."""
+    try:
+        if not db_pool:
+            logging.error("Database pool not initialized")
+            return None
+            
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                'SELECT data FROM profile WHERE uid = $1',
+                user_id
+            )
+            return json.loads(row['data']) if row else None
+    except Exception as e:
+        logging.error(f"Error fetching user profile: {str(e)}")
+        return None
+
+async def save_user_profile(user_id: int, profile_data: dict) -> bool:
+    """Save user profile to database."""
+    try:
+        if not db_pool:
+            logging.error("Database pool not initialized")
+            return False
+            
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO profile (uid, data)
+                VALUES ($1, $2)
+                ON CONFLICT (uid) 
+                DO UPDATE SET data = $2
+            ''', user_id, json.dumps(profile_data))
+        return True
+    except Exception as e:
+        logging.error(f"Error saving user profile: {str(e)}")
+        return False
 
 # ───────────────────────────── assets ─────────────────────────────────────── #
 def init_assets() -> None:
@@ -173,11 +251,13 @@ async def setup_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def ask_next(update_or_query, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     i = ctx.user_data["i"]
     if i >= len(QUESTS):
-        data = json.dumps(ctx.user_data["ans"])
+        data = ctx.user_data["ans"]
         uid = update_or_query.effective_chat.id if hasattr(update_or_query, 'effective_chat') else update_or_query.message.chat.id
-        with sqlite3.connect(DB) as con:
-            con.execute("REPLACE INTO profile VALUES (?,?)", (uid, data))
-        await update_or_query.message.reply_text("✅ Profile saved!", reply_markup=MAIN_MENU)
+        
+        if await save_user_profile(uid, data):
+            await update_or_query.message.reply_text("✅ Profile saved!", reply_markup=MAIN_MENU)
+        else:
+            await update_or_query.message.reply_text("❌ Failed to save profile. Please try again.", reply_markup=MAIN_MENU)
         return ConversationHandler.END
 
     key, question = QUESTS[i]
@@ -212,10 +292,11 @@ async def handle_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         
         # Check if this was the last question
         if ctx.user_data["i"] >= len(QUESTS):
-            data = json.dumps(ctx.user_data["ans"])
-            with sqlite3.connect(DB) as con:
-                con.execute("REPLACE INTO profile VALUES (?,?)", (query.from_user.id, data))
-            await query.message.reply_text("✅ Profile saved!", reply_markup=MAIN_MENU)
+            data = ctx.user_data["ans"]
+            if await save_user_profile(query.from_user.id, data):
+                await query.message.reply_text("✅ Profile saved!", reply_markup=MAIN_MENU)
+            else:
+                await query.message.reply_text("❌ Failed to save profile. Please try again.", reply_markup=MAIN_MENU)
             return ConversationHandler.END
             
         return await ask_next(query, ctx)
@@ -263,6 +344,23 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the trade flow."""
     logger.info("Starting trade flow")
     
+    # Check if user has completed profile
+    profile = await get_user_profile(update.effective_user.id)
+    if not profile:
+        buttons = [[InlineKeyboardButton("🔧 Setup Profile Now", callback_data="setup:start")]]
+        markup = InlineKeyboardMarkup(buttons)
+        await update.message.reply_text(
+            "⚠️ Please set up your trading profile first!\n\n"
+            "This helps me provide personalized trade suggestions and analysis based on:\n"
+            "• Your experience level\n"
+            "• Capital allocation\n"
+            "• Risk tolerance\n"
+            "• Preferred timeframes\n"
+            "• And more...",
+            reply_markup=markup
+        )
+        return
+        
     # Use consistent callback data format: action:asset
     buttons = [
         [InlineKeyboardButton("BTC-PERP", callback_data="trade:BTC-PERP")],
@@ -285,19 +383,6 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "Sorry, there was an error. Please try again or contact support.",
             reply_markup=MAIN_MENU
         )
-
-async def get_user_profile(user_id: int) -> dict:
-    """Get user profile from database."""
-    try:
-        with sqlite3.connect(DB) as con:
-            cursor = con.cursor()
-            cursor.execute("SELECT data FROM profile WHERE uid = ?", (user_id,))
-            result = cursor.fetchone()
-            if result:
-                return json.loads(result[0])
-    except Exception as e:
-        logger.error(f"Error fetching user profile: {str(e)}")
-    return None
 
 async def format_profile_context(profile: dict) -> str:
     """Format user profile into context string for REI prompts."""
@@ -328,10 +413,6 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # Always answer callback query first to prevent "loading" state
         await query.answer()
         
-        # Get user profile for context
-        profile = await get_user_profile(query.from_user.id)
-        profile_context = await format_profile_context(profile)
-        
         # Split callback data into action and value
         if ":" not in query.data:
             logger.error(f"Invalid callback data format: {query.data}")
@@ -342,6 +423,29 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
             
         action, value = query.data.split(":", 1)
+        
+        # Special handling for setup:start action
+        if action == "setup" and value == "start":
+            return await setup_start(query, ctx)
+            
+        # For all other actions, check profile first
+        profile = await get_user_profile(query.from_user.id)
+        if not profile and action != "setup":
+            buttons = [[InlineKeyboardButton("🔧 Setup Profile Now", callback_data="setup:start")]]
+            markup = InlineKeyboardMarkup(buttons)
+            await query.message.reply_text(
+                "⚠️ Please set up your trading profile first!\n\n"
+                "This helps me provide personalized trade suggestions and analysis based on:\n"
+                "• Your experience level\n"
+                "• Capital allocation\n"
+                "• Risk tolerance\n"
+                "• Preferred timeframes\n"
+                "• And more...",
+                reply_markup=markup
+            )
+            return
+            
+        profile_context = await format_profile_context(profile)
         
         if action == "trade":
             if value == "SUGGEST":
@@ -512,13 +616,13 @@ async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     )
 
 # ───────────────────────────── main ─────────────────────────────────────── #
-def main() -> None:
+async def main() -> None:
     """Start the bot."""
     logger.info("Starting bot")
     try:
         # Initialize environment and database
         init_env()
-        init_db()
+        await init_db()  # Now async
         init_assets()
         
         # Initialize bot
@@ -555,14 +659,49 @@ def main() -> None:
         # Add handler for custom asset input
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
         
+        # Add admin command to check database contents
+        app.add_handler(CommandHandler('checkdb', check_db_cmd))
+        
         logger.info("All handlers registered")
 
         # Start polling
         logger.info("Starting polling")
-        app.run_polling()
+        await app.run_polling()
         
     except Exception as e:
         logger.error(f"Error in main: {str(e)}", exc_info=True)
 
+async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to check database contents"""
+    try:
+        if not db_pool:
+            await update.message.reply_text("❌ Database not connected")
+            return
+            
+        async with db_pool.acquire() as conn:
+            # Get total number of profiles
+            count = await conn.fetchval('SELECT COUNT(*) FROM profile')
+            
+            # Get last 5 profiles
+            rows = await conn.fetch('''
+                SELECT uid, data->>'experience' as exp, 
+                       data->>'capital' as cap,
+                       data->>'timeframe' as tf
+                FROM profile 
+                ORDER BY uid DESC 
+                LIMIT 5
+            ''')
+            
+            # Format message
+            msg = f"📊 Database Status:\n\nTotal Profiles: {count}\n\nLast 5 profiles:"
+            for row in rows:
+                msg += f"\n• User {row['uid']}: {row['exp']}, {row['cap']}, {row['tf']}"
+            
+            await update.message.reply_text(msg)
+            
+    except Exception as e:
+        logger.error(f"Error checking database: {str(e)}")
+        await update.message.reply_text("❌ Error checking database")
+
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
