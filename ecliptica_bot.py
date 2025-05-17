@@ -156,12 +156,34 @@ async def ask_next(update_or_query, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     return SETUP
 
 async def handle_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    data = update.callback_query.data.split(":")
-    _, key, value = data
-    ctx.user_data["ans"][key] = value
-    ctx.user_data["i"] += 1
-    await update.callback_query.answer()
-    return await ask_next(update, ctx)
+    try:
+        query = update.callback_query
+        if not query:
+            return SETUP
+            
+        logging.info(f"Received callback data: {query.data}")
+        
+        if ":" not in query.data:
+            await query.answer("Invalid callback data")
+            return SETUP
+            
+        data = query.data.split(":")
+        if len(data) != 3:
+            await query.answer("Invalid callback format")
+            return SETUP
+            
+        _, key, value = data
+        ctx.user_data["ans"][key] = value
+        ctx.user_data["i"] += 1
+        
+        await query.answer(f"Selected: {value}")
+        return await ask_next(query, ctx)
+        
+    except Exception as e:
+        logging.error(f"Error in handle_setup: {str(e)}")
+        if update.callback_query:
+            await update.callback_query.answer("An error occurred")
+        return SETUP
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Setup cancelled.", reply_markup=MAIN_MENU)
@@ -206,11 +228,19 @@ def main() -> None:
     app.add_handler(
         ConversationHandler(
             entry_points=[MessageHandler(filters.Regex(r'^🔧 Setup Profile$'), setup_start),
-                          CommandHandler('setup', setup_start)],
-            states={ SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')] },
+                         CommandHandler('setup', setup_start)],
+            states={
+                SETUP: [
+                    CallbackQueryHandler(handle_setup),  # Remove pattern restriction to catch all callbacks
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, setup_start)
+                ]
+            },
             fallbacks=[CommandHandler('cancel', cancel)]
         )
     )
+
+    # Add a general callback query handler for debugging
+    app.add_handler(CallbackQueryHandler(handle_setup))
 
     app.run_polling()
 
