@@ -287,10 +287,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Start command handler with error logging"""
     try:
         logger.info(f"Start command received from user {update.effective_user.id}")
-    await update.message.reply_text(
-        "👋 Welcome! Press ▶️ Start to begin.",
-        reply_markup=INIT_MENU
-    )
+        await update.message.reply_text(
+            "👋 Welcome! Press ▶️ Start to begin.",
+            reply_markup=INIT_MENU
+        )
         logger.info("Start message sent successfully")
     except Exception as e:
         logger.error(f"Error in start command: {str(e)}", exc_info=True)
@@ -361,9 +361,9 @@ async def handle_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             await query.answer("Invalid callback format")
             return SETUP
             
-    _, key, value = data
-    ctx.user_data["ans"][key] = value
-    ctx.user_data["i"] += 1
+        _, key, value = data
+        ctx.user_data["ans"][key] = value
+        ctx.user_data["i"] += 1
         
         await query.answer(f"Selected: {value}")
         
