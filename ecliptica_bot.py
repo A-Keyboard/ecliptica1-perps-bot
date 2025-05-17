@@ -676,7 +676,7 @@ async def main() -> None:
                 SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
             },
             fallbacks=[CommandHandler('cancel', cancel)],
-            per_message=True  # Add this line to fix the warning
+            per_message=False  # Changed from True to False
         )
         
         # Add handlers in specific order
@@ -702,9 +702,9 @@ async def main() -> None:
 
         # Start polling
         logger.info("Starting polling")
-        await app.initialize()  # Initialize first
+        await app.initialize()
         await app.start()
-        await app.run_polling(allowed_updates=Update.ALL_TYPES)
+        await app.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)  # Added close_loop=False
         
     except Exception as e:
         logger.error(f"Error in main: {str(e)}", exc_info=True)
@@ -752,11 +752,24 @@ async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 def run_bot():
     """Run the bot with proper asyncio handling"""
     try:
-        asyncio.run(main())
+        # Get or create an event loop
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Run the main function
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot stopped due to error: {str(e)}", exc_info=True)
+    finally:
+        try:
+            loop.close()
+        except Exception as e:
+            logger.error(f"Error closing event loop: {str(e)}")
 
 if __name__ == '__main__':
     run_bot()
