@@ -92,16 +92,42 @@ def init_assets() -> None:
 
 # ───────────────────────────── rei request ────────────────────────────────── #
 async def rei_call(prompt: str) -> str:
+    """Make an async call to REI API with better error handling."""
+    logger.info(f"Making REI API call with prompt: {prompt}")
+    
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
-    body = {"model":"rei-core-chat-001","temperature":0.2,
-            "messages":[{"role":"user","content":prompt}]}
-    async with token_lock:
-        resp = requests.post(
-            "https://api.reisearch.box/v1/chat/completions",
-            headers=headers, json=body, timeout=300
-        )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    body = {
+        "model": "rei-core-chat-001",
+        "temperature": 0.2,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.reisearch.box/v1/chat/completions",
+                headers=headers,
+                json=body,
+                timeout=300
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"REI API error: Status {resp.status}, Response: {error_text}")
+                    raise Exception(f"REI API returned status {resp.status}")
+                
+                data = await resp.json()
+                if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
+                    logger.error(f"Unexpected REI API response format: {data}")
+                    raise Exception("Invalid response format from REI API")
+                
+                return data["choices"][0]["message"]["content"].strip()
+                
+    except aiohttp.ClientError as e:
+        logger.error(f"Network error calling REI API: {str(e)}")
+        raise Exception(f"Network error: {str(e)}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON response from REI API: {str(e)}")
+        raise
 
 # ───────────────────────────── telegram callbacks ────────────────────────── #
 INIT_MENU = ReplyKeyboardMarkup(
@@ -288,8 +314,15 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             if value == "SUGGEST":
                 logger.debug("Processing suggestion request")
                 await query.message.reply_text("🧠 Analyzing market conditions...")
-                suggestion = await rei_call("Suggest a high-probability trade setup")
-                await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+                try:
+                    suggestion = await rei_call("Suggest a high-probability trade setup")
+                    await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+                except Exception as e:
+                    logger.error(f"Error getting trade suggestion: {str(e)}")
+                    await query.message.reply_text(
+                        "Sorry, I couldn't generate a trade suggestion at the moment. Please try again later.",
+                        reply_markup=MAIN_MENU
+                    )
                 
             elif value == "CUSTOM":
                 logger.debug("Processing custom asset request")
@@ -308,31 +341,56 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 
         elif action == "analysis":
-            analysis_type, asset = value.split(":", 1)
-            logger.debug(f"Processing {analysis_type} request for {asset}")
-            
-            if analysis_type == "setup":
-                await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
-                response = await rei_call(
-                    f"Provide a detailed trade setup for {asset} including:\n"
-                    f"1. Entry zone/price\n"
-                    f"2. Stop loss level\n"
-                    f"3. Take profit targets\n"
-                    f"4. Risk:reward ratio\n"
-                    f"5. Key levels to watch"
-                )
-            else:  # market analysis
-                await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
-                response = await rei_call(
-                    f"Provide comprehensive market analysis for {asset} including:\n"
-                    f"1. Technical analysis (trend, S/R levels, patterns)\n"
-                    f"2. Market structure\n"
-                    f"3. Key fundamental factors\n"
-                    f"4. Volume analysis\n"
-                    f"5. Overall market sentiment"
-                )
+            try:
+                analysis_type, asset = value.split(":", 1)
+                logger.debug(f"Processing {analysis_type} request for {asset}")
                 
-            await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+                if analysis_type == "setup":
+                    await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
+                    try:
+                        response = await rei_call(
+                            f"Provide a detailed trade setup for {asset} including:\n"
+                            f"1. Entry zone/price\n"
+                            f"2. Stop loss level\n"
+                            f"3. Take profit targets\n"
+                            f"4. Risk:reward ratio\n"
+                            f"5. Key levels to watch"
+                        )
+                    except Exception as e:
+                        logger.error(f"Error generating trade setup: {str(e)}")
+                        await query.message.reply_text(
+                            "Sorry, I couldn't generate a trade setup at the moment. Please try again later.",
+                            reply_markup=MAIN_MENU
+                        )
+                        return
+                        
+                else:  # market analysis
+                    await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
+                    try:
+                        response = await rei_call(
+                            f"Provide comprehensive market analysis for {asset} including:\n"
+                            f"1. Technical analysis (trend, S/R levels, patterns)\n"
+                            f"2. Market structure\n"
+                            f"3. Key fundamental factors\n"
+                            f"4. Volume analysis\n"
+                            f"5. Overall market sentiment"
+                        )
+                    except Exception as e:
+                        logger.error(f"Error generating market analysis: {str(e)}")
+                        await query.message.reply_text(
+                            "Sorry, I couldn't generate the market analysis at the moment. Please try again later.",
+                            reply_markup=MAIN_MENU
+                        )
+                        return
+                        
+                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+                
+            except ValueError:
+                logger.error(f"Invalid analysis value format: {value}")
+                await query.message.reply_text(
+                    "Sorry, there was an error processing your request. Please try again.",
+                    reply_markup=MAIN_MENU
+                )
             
         else:
             logger.warning(f"Unknown action in callback: {action}")
