@@ -97,7 +97,8 @@ SUBSCRIPTION_PLANS = {
 # Valid promo codes (in a real system, store these securely and don't hardcode)
 PROMO_CODES = {
     "ECLIPTICA2024": {"days": 30, "description": "Free 30-day trial"},
-    "PERPSMASTER": {"days": 90, "description": "Free 90-day access for early supporters"}
+    "PERPSMASTER": {"days": 90, "description": "Free 90-day access for early supporters"},
+    "UNLIMITED2024": {"days": 3650, "description": "Unlimited 10-year access for testing"}
 }
 
 # Number of free market analyses before requiring subscription
@@ -832,7 +833,7 @@ INIT_MENU = ReplyKeyboardMarkup(
 MAIN_MENU = ReplyKeyboardMarkup(
     [["🔧 Setup Profile", "📊 Trade"], 
      ["🤖 Ask AI", "❓ FAQ"],
-     ["💰 Subscription", "🎟️ Enter Code"]],
+     ["💰 Subscription", "🎫 Enter Code"]],
     resize_keyboard=True
 )
 
@@ -1961,6 +1962,7 @@ def init_handlers(application: Application) -> None:
     application.add_handler(CommandHandler('help', help_cmd))
     application.add_handler(CommandHandler('checkdb', check_db_cmd))
     application.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
+    application.add_handler(CallbackQueryHandler(handle_subscription_callback, pattern=r'^sub:'))
     
     # Add the custom asset handler as the LAST handler
     # It should only receive messages that aren't caught by any of the above handlers
