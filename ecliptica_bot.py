@@ -231,17 +231,24 @@ async def fetch_top_volume_assets() -> List[str]:
 async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     top_assets = await fetch_top_volume_assets()
     
-    # Create keyboard with top volume assets and additional options
-    buttons = [
-        [InlineKeyboardButton(f"📈 {asset}", callback_data=f"trade:{asset}")]
-        for asset in top_assets
-    ]
-    buttons.extend([
-        [InlineKeyboardButton("🎯 Get Trade Suggestion", callback_data="trade:suggest")],
-        [InlineKeyboardButton("🔍 Custom Asset", callback_data="trade:custom")]
+    keyboard = []
+    # Add top volume assets
+    for asset in top_assets:
+        keyboard.append([{
+            'text': f"📈 {asset}",
+            'callback_data': f"asset_{asset}"
+        }])
+    
+    # Add additional options
+    keyboard.extend([
+        [{'text': "🎯 Get Trade Suggestion", 'callback_data': "suggest"}],
+        [{'text': "🔍 Custom Asset", 'callback_data': "custom"}]
     ])
     
+    # Convert dict to InlineKeyboardButton
+    buttons = [[InlineKeyboardButton(**button) for button in row] for row in keyboard]
     markup = InlineKeyboardMarkup(buttons)
+    
     await update.message.reply_text(
         "Choose from top volume assets or get a suggestion:",
         reply_markup=markup
@@ -260,28 +267,27 @@ async def handle_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             return await provide_trade_options(update.message, ctx)
             
         await query.answer()
-        logging.info(f"Received callback data: {query.data}")
+        data = query.data
+        logging.info(f"Received callback data: {data}")
         
-        if not query.data.startswith('trade:'):
-            await query.message.reply_text("Invalid selection. Please try again.")
-            return ConversationHandler.END
-            
-        action = query.data.split(':', 1)[1]  # Split only on first colon
-        
-        if action == 'suggest':
+        if data.startswith('asset_'):
+            asset = data.replace('asset_', '')
+            ctx.user_data['asset'] = asset
+            return await provide_trade_options(query.message, ctx)
+        elif data == 'suggest':
             return await provide_trade_suggestion(query.message, ctx)
-        elif action == 'custom':
+        elif data == 'custom':
             await query.message.reply_text(
                 "Enter asset symbol (e.g. BTC, ETH):\nI'll add -PERP automatically."
             )
             return TRADE_CUSTOM
-        elif action == 'setup':
+        elif data == 'setup':
             return await generate_trade_setup(query.message, ctx)
-        elif action == 'analysis':
+        elif data == 'analysis':
             return await provide_market_analysis(query.message, ctx)
-        else:  # Must be an asset selection
-            ctx.user_data['asset'] = action
-            return await provide_trade_options(query.message, ctx)
+        else:
+            await query.message.reply_text("Invalid selection. Please try again.")
+            return ConversationHandler.END
             
     except Exception as e:
         logging.error(f"Error in handle_trade: {str(e)}")
@@ -291,11 +297,13 @@ async def handle_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def provide_trade_options(message: Message, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     asset = ctx.user_data.get('asset')
-    buttons = [
-        [InlineKeyboardButton("📊 Get Trade Setup", callback_data="trade:setup")],
-        [InlineKeyboardButton("📈 Market Analysis", callback_data="trade:analysis")],
+    keyboard = [
+        [{'text': "📊 Get Trade Setup", 'callback_data': "setup"}],
+        [{'text': "📈 Market Analysis", 'callback_data': "analysis"}]
     ]
+    buttons = [[InlineKeyboardButton(**button) for button in row] for row in keyboard]
     markup = InlineKeyboardMarkup(buttons)
+    
     await message.reply_text(
         f"What would you like to know about {asset}?",
         reply_markup=markup
@@ -433,17 +441,17 @@ def main() -> None:
             ],
             states={
                 TRADE_ASSET: [
-                    CallbackQueryHandler(handle_trade, pattern=r'^trade:'),
+                    CallbackQueryHandler(handle_trade),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, trade_start)
                 ],
                 TRADE_CUSTOM: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_trade)
                 ],
                 TRADE_SETUP: [
-                    CallbackQueryHandler(handle_trade, pattern=r'^trade:'),
+                    CallbackQueryHandler(handle_trade),
                 ],
                 TRADE_ANALYSIS: [
-                    CallbackQueryHandler(handle_trade, pattern=r'^trade:'),
+                    CallbackQueryHandler(handle_trade),
                 ]
             },
             fallbacks=[CommandHandler('cancel', cancel)]
