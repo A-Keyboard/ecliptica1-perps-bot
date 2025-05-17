@@ -767,10 +767,13 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 if analysis_type == "market":
                     await handle_market_analysis(query, asset, profile_context, profile)
                 elif analysis_type == "setup":
-                    # Similar handler for setup could be implemented here
-                    await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
-                    # Use fallback for now
-                    await query.message.reply_text(get_fallback_response(asset, "setup"))
+                    await handle_trade_setup(query, asset, profile_context, profile)
+                else:
+                    logger.warning(f"Unknown analysis type: {analysis_type}")
+                    await query.message.reply_text(
+                        "Invalid analysis type. Please try again.",
+                        reply_markup=MAIN_MENU
+                    )
                     
             except Exception as e:
                 logger.error(f"Error in analysis handler: {str(e)}", exc_info=True)
@@ -787,18 +790,25 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 await query.message.reply_text("🧠 Analyzing market conditions...")
                 try:
                     start_time = datetime.now()
-                    suggestion = await rei_call(
-                        "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
-                        f"{profile_context}\n\n"
-                        "Include:\n"
-                        "1. Asset selection and reasoning\n"
-                        "2. Entry strategy with specific levels\n"
-                        "3. Stop loss placement\n"
-                        "4. Take profit targets\n"
-                        "5. Risk:reward ratio\n"
-                        "6. Key market conditions supporting this trade\n"
-                        "7. Compatibility with user's profile"
-                    )
+                    
+                    try:
+                        suggestion = await rei_call(
+                            "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
+                            f"{profile_context}\n\n"
+                            "Include:\n"
+                            "1. Asset selection and reasoning\n"
+                            "2. Entry strategy with specific levels\n"
+                            "3. Stop loss placement\n"
+                            "4. Take profit targets\n"
+                            "5. Risk:reward ratio\n"
+                            "6. Key market conditions supporting this trade\n"
+                            "7. Compatibility with user's profile"
+                        )
+                    except Exception as primary_e:
+                        logger.warning(f"Primary API call failed for suggestion: {str(primary_e)}")
+                        # Use a simple fallback
+                        suggestion = get_fallback_response("", "")
+                    
                     end_time = datetime.now()
                     duration = (end_time - start_time).total_seconds()
                     logger.info(f"Trade suggestion completed in {duration} seconds")
@@ -948,6 +958,98 @@ async def handle_market_analysis(query, asset, profile_context, profile):
         # Last resort fallback
         await query.message.reply_text(
             get_fallback_response(asset, "market"),
+            reply_markup=MAIN_MENU
+        )
+
+async def handle_trade_setup(query, asset, profile_context, profile):
+    """Handle trade setup request with reliable fallbacks."""
+    await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
+    try:
+        logger.debug("Preparing trade setup prompt")
+        prompt = (
+            f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
+            f"{profile_context}\n\n"
+            f"Include:\n"
+            f"1. Current Market Context\n"
+            f"   - Price action summary\n"
+            f"   - Key levels in play\n"
+            f"   - Market structure\n\n"
+            f"2. Trade Setup Details\n"
+            f"   - Entry zone/price with reasoning\n"
+            f"   - Stop loss placement and rationale\n"
+            f"   - Take profit targets (multiple levels)\n"
+            f"   - Position sizing based on user's capital and risk\n\n"
+            f"3. Risk Management\n"
+            f"   - Risk:reward ratio\n"
+            f"   - Maximum risk per trade (based on user's preference)\n"
+            f"   - Key invalidation points\n\n"
+            f"4. Important Considerations\n"
+            f"   - Potential catalysts\n"
+            f"   - Key risks to watch\n"
+            f"   - Timeframe alignment with user's preference\n"
+            f"   - Funding rate implications"
+        )
+        
+        logger.debug("Calling REI API for trade setup")
+        start_time = datetime.now()
+        logger.debug(f"Starting REI API call at {start_time}")
+        
+        # Try primary API first
+        try:
+            response = await rei_call(prompt)
+            logger.info("Primary API call succeeded")
+        except Exception as primary_e:
+            logger.warning(f"Primary API call failed: {str(primary_e)}")
+            
+            # Try alternative API
+            try:
+                logger.info("Trying alternative API endpoint")
+                shorter_prompt = (
+                    f"Provide a concise trade setup for {asset} with these key points:\n"
+                    f"- Current market context and price action\n"
+                    f"- Entry zone/price with reasoning\n"
+                    f"- Stop loss placement and rationale\n"
+                    f"- Take profit targets\n"
+                    f"- Risk management considerations"
+                )
+                response = await rei_call_alternative(shorter_prompt)
+                logger.info("Alternative API call succeeded")
+            except Exception as alt_e:
+                logger.error(f"Alternative API also failed: {str(alt_e)}")
+                # Fall back to static response
+                response = get_fallback_response(asset, "setup")
+                logger.info("Using static fallback response")
+        
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.info(f"Total processing time: {duration} seconds")
+        
+        # Split response into chunks if too long
+        if len(response) > 4096:
+            logger.debug("Response too long, splitting into chunks")
+            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
+            for i, chunk in enumerate(chunks):
+                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
+                try:
+                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+                except Exception as chunk_e:
+                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
+                    # If markdown fails, try sending without parsing
+                    await query.message.reply_text(chunk)
+        else:
+            logger.debug("Sending single response message")
+            try:
+                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+            except Exception as send_e:
+                logger.error(f"Error sending response with markdown: {str(send_e)}")
+                # If markdown fails, try sending without parsing
+                await query.message.reply_text(response)
+                
+    except Exception as e:
+        logger.error(f"Complete failure in trade setup: {str(e)}", exc_info=True)
+        # Last resort fallback
+        await query.message.reply_text(
+            get_fallback_response(asset, "setup"),
             reply_markup=MAIN_MENU
         )
 
