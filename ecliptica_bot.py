@@ -676,7 +676,7 @@ async def main() -> None:
             SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
         },
         fallbacks=[CommandHandler('cancel', cancel)],
-        per_message=False  # Changed back to False as we have mixed handlers
+        name="setup_conversation"
     )
     
     # Add handlers in specific order
@@ -699,23 +699,14 @@ async def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
     
     logger.info("All handlers registered")
-    logger.info("Starting polling")
     
-    try:
-        await app.initialize()
-        await app.start()
-        await app.run_polling(allowed_updates=Update.ALL_TYPES)
-    except Exception as e:
-        logger.error(f"Error during polling: {str(e)}", exc_info=True)
-        raise
-    finally:
-        logger.info("Stopping application...")
-        try:
-            if db_pool:
-                await db_pool.close()
-            await app.stop()
-        except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}", exc_info=True)
+    # Add error handler
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.error("Exception while handling an update:", exc_info=context.error)
+        
+    app.add_error_handler(error_handler)
+    
+    return app
 
 async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to check database contents"""
@@ -751,8 +742,22 @@ async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        # Create application
+        app = asyncio.run(main())
+        
+        # Run application with built-in runner
+        app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            stop_signals=[],  # Disable signal handling as Railway manages this
+            close_loop=False  # Let Railway manage the event loop
+        )
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot stopped due to error: {str(e)}", exc_info=True)
+    finally:
+        if 'app' in locals():
+            try:
+                app.stop()
+            except Exception as e:
+                logger.error(f"Error stopping application: {str(e)}", exc_info=True)
