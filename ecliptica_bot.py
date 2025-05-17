@@ -37,6 +37,10 @@ import asyncpg
 import traceback
 import sys
 import signal
+import uuid
+import hashlib
+from coinbase_commerce.client import Client
+from coinbase_commerce.error import SignatureVerificationError, WebhookInvalidPayload
 
 # Set up logging first
 logging.basicConfig(
@@ -81,7 +85,23 @@ db_pool = None
 token_lock = asyncio.Lock()
 
 # Conversation states
-(SETUP, SELECTING_ASSET, ANALYZING_ASSET, TRADING) = range(4)
+(SETUP, SELECTING_ASSET, ANALYZING_ASSET, TRADING, SUBSCRIPTION, ENTER_CODE) = range(6)
+
+# Subscription configuration
+SUBSCRIPTION_PLANS = {
+    "monthly": {"name": "Monthly Plan", "price": 19.99, "days": 30, "description": "Full access to all features for 30 days"},
+    "quarterly": {"name": "Quarterly Plan", "price": 49.99, "days": 90, "description": "Full access to all features for 90 days (save 17%)"},
+    "annual": {"name": "Annual Plan", "price": 149.99, "days": 365, "description": "Full access to all features for a full year (save 37%)"}
+}
+
+# Valid promo codes (in a real system, store these securely and don't hardcode)
+PROMO_CODES = {
+    "ECLIPTICA2024": {"days": 30, "description": "Free 30-day trial"},
+    "PERPSMASTER": {"days": 90, "description": "Free 90-day access for early supporters"}
+}
+
+# Number of free market analyses before requiring subscription
+FREE_ANALYSIS_LIMIT = 3
 
 # Setup questions + options
 QUESTS: Final[List[tuple[str, str]]] = [
@@ -151,19 +171,27 @@ async def set_user_processing(user_id: int, processing: bool) -> None:
 # ───────────────────────────── environment ─────────────────────────────────── #
 def init_env() -> None:
     load_dotenv()
-    global BOT_TOKEN, REI_KEY
+    global BOT_TOKEN, REI_KEY, COINBASE_API_KEY, COINBASE_WEBHOOK_SECRET
     BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     REI_KEY = os.environ.get("REICORE_API_KEY", "").strip()
+    COINBASE_API_KEY = os.environ.get("COINBASE_API_KEY", "").strip()
+    COINBASE_WEBHOOK_SECRET = os.environ.get("COINBASE_WEBHOOK_SECRET", "").strip()
     
     # Log environment status (without exposing sensitive data)
     logger.info("Environment initialization:")
     logger.info(f"BOT_TOKEN present: {bool(BOT_TOKEN)}")
     logger.info(f"REI_KEY present: {bool(REI_KEY)}")
+    logger.info(f"COINBASE_API_KEY present: {bool(COINBASE_API_KEY)}")
+    logger.info(f"COINBASE_WEBHOOK_SECRET present: {bool(COINBASE_WEBHOOK_SECRET)}")
     
     if not BOT_TOKEN:
         raise Exception("TELEGRAM_BOT_TOKEN not set")
     if not REI_KEY:
         raise Exception("REICORE_API_KEY not set")
+    if not COINBASE_API_KEY:
+        logger.warning("COINBASE_API_KEY not set - subscription features will be limited")
+    if not COINBASE_WEBHOOK_SECRET:
+        logger.warning("COINBASE_WEBHOOK_SECRET not set - webhook verification disabled")
 
 # ───────────────────────────── database ────────────────────────────────────── #
 async def init_db() -> None:
@@ -203,13 +231,43 @@ async def init_db() -> None:
         # Create tables if they don't exist
         async with db_pool.acquire() as conn:
             logger.info("Creating tables if they don't exist...")
+            # Create profile table
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS profile (
                     uid BIGINT PRIMARY KEY,
                     data JSONB
                 )
             ''')
-            # Verify table was created
+            
+            # Create subscriptions table
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    uid BIGINT PRIMARY KEY,
+                    plan_type TEXT,
+                    start_date TIMESTAMP WITH TIME ZONE,
+                    end_date TIMESTAMP WITH TIME ZONE,
+                    payment_id TEXT,
+                    status TEXT,
+                    usage_count INTEGER DEFAULT 0,
+                    promo_code TEXT
+                )
+            ''')
+            
+            # Create payment tracking table
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS payments (
+                    payment_id TEXT PRIMARY KEY,
+                    uid BIGINT,
+                    amount NUMERIC(10, 2),
+                    currency TEXT,
+                    plan_type TEXT,
+                    status TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    completed_at TIMESTAMP WITH TIME ZONE
+                )
+            ''')
+            
+            # Verify tables were created
             table_exists = await conn.fetchval(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'profile')"
             )
@@ -220,6 +278,18 @@ async def init_db() -> None:
                 logger.info(f"Current number of profiles in database: {count}")
             else:
                 logger.error("Failed to create profile table!")
+                
+            # Verify subscription table
+            sub_table_exists = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'subscriptions')"
+            )
+            if sub_table_exists:
+                logger.info("Subscriptions table exists and is ready")
+                # Count active subscriptions
+                count = await conn.fetchval("SELECT COUNT(*) FROM subscriptions WHERE end_date > NOW()")
+                logger.info(f"Current number of active subscriptions: {count}")
+            else:
+                logger.error("Failed to create subscriptions table!")
                 
         logger.info("Database initialization completed successfully")
     except Exception as e:
@@ -272,6 +342,241 @@ def init_assets() -> None:
     except FileNotFoundError:
         ASSETS = []
     logging.info(f"Loaded {len(ASSETS)} assets")
+
+# ───────────────────────────── subscription ─────────────────────────────────── #
+async def get_user_subscription(user_id: int) -> dict:
+    """Get a user's subscription status."""
+    try:
+        if not db_pool:
+            logging.error("Database pool not initialized")
+            return None
+            
+        async with db_pool.acquire() as conn:
+            # Get the subscription record
+            row = await conn.fetchrow(
+                '''
+                SELECT uid, plan_type, start_date, end_date, payment_id, status, usage_count, promo_code
+                FROM subscriptions
+                WHERE uid = $1
+                ''',
+                user_id
+            )
+            
+            if not row:
+                return None
+                
+            # Convert to dict
+            subscription = dict(row)
+            
+            # Check if subscription is active
+            now = datetime.now(timezone.utc)
+            is_active = subscription['end_date'] > now and subscription['status'] == 'active'
+            
+            # Add additional fields
+            subscription['is_active'] = is_active
+            subscription['days_remaining'] = (subscription['end_date'] - now).days if is_active else 0
+            
+            return subscription
+            
+    except Exception as e:
+        logging.error(f"Error fetching user subscription: {str(e)}")
+        return None
+
+async def create_subscription(user_id: int, plan_type: str, payment_id: str = None, promo_code: str = None) -> bool:
+    """Create or update a user subscription."""
+    try:
+        if not db_pool:
+            logging.error("Database pool not initialized")
+            return False
+            
+        # Get plan details
+        plan = None
+        if plan_type in SUBSCRIPTION_PLANS:
+            plan = SUBSCRIPTION_PLANS[plan_type]
+        elif promo_code and promo_code in PROMO_CODES:
+            # For promo codes, create a custom plan
+            promo = PROMO_CODES[promo_code]
+            plan = {"days": promo["days"]}
+            plan_type = "promo"
+            
+        if not plan:
+            logging.error(f"Invalid plan type or promo code: {plan_type} / {promo_code}")
+            return False
+            
+        # Calculate dates
+        now = datetime.now(timezone.utc)
+        days = plan["days"]
+        end_date = now + timedelta(days=days)
+        
+        async with db_pool.acquire() as conn:
+            # Check if subscription already exists
+            existing = await conn.fetchval(
+                'SELECT uid FROM subscriptions WHERE uid = $1',
+                user_id
+            )
+            
+            if existing:
+                # Update existing subscription
+                await conn.execute(
+                    '''
+                    UPDATE subscriptions
+                    SET plan_type = $2, start_date = $3, end_date = $4, payment_id = $5,
+                        status = 'active', promo_code = $6
+                    WHERE uid = $1
+                    ''',
+                    user_id, plan_type, now, end_date, payment_id, promo_code
+                )
+            else:
+                # Create new subscription
+                await conn.execute(
+                    '''
+                    INSERT INTO subscriptions
+                    (uid, plan_type, start_date, end_date, payment_id, status, usage_count, promo_code)
+                    VALUES ($1, $2, $3, $4, $5, 'active', 0, $6)
+                    ''',
+                    user_id, plan_type, now, end_date, payment_id, promo_code
+                )
+                
+            return True
+            
+    except Exception as e:
+        logging.error(f"Error creating subscription: {str(e)}")
+        return False
+
+async def increment_usage_count(user_id: int) -> int:
+    """Increment the usage count for a user and return the new count."""
+    try:
+        if not db_pool:
+            logging.error("Database pool not initialized")
+            return 0
+            
+        async with db_pool.acquire() as conn:
+            # Check if user has a subscription record
+            exists = await conn.fetchval(
+                'SELECT uid FROM subscriptions WHERE uid = $1',
+                user_id
+            )
+            
+            if not exists:
+                # Create a default record with count 1
+                await conn.execute(
+                    '''
+                    INSERT INTO subscriptions
+                    (uid, usage_count, status)
+                    VALUES ($1, 1, 'free')
+                    ''',
+                    user_id
+                )
+                return 1
+                
+            # Update usage count
+            new_count = await conn.fetchval(
+                '''
+                UPDATE subscriptions
+                SET usage_count = usage_count + 1
+                WHERE uid = $1
+                RETURNING usage_count
+                ''',
+                user_id
+            )
+            
+            return new_count
+            
+    except Exception as e:
+        logging.error(f"Error incrementing usage count: {str(e)}")
+        return 0
+
+async def check_subscription_access(user_id: int) -> tuple[bool, str]:
+    """
+    Check if a user has access to premium features.
+    Returns (has_access, message)
+    """
+    # Get subscription status
+    subscription = await get_user_subscription(user_id)
+    
+    if subscription and subscription['is_active']:
+        # User has an active subscription
+        return True, ""
+        
+    # Check usage count for free tier
+    if subscription:
+        usage_count = subscription['usage_count']
+    else:
+        # No subscription record yet, first use
+        usage_count = 0
+        
+    if usage_count < FREE_ANALYSIS_LIMIT:
+        # Still within free usage limits
+        remaining = FREE_ANALYSIS_LIMIT - usage_count
+        return True, f"You have {remaining} free analyses remaining. Subscribe for unlimited access."
+    
+    # No access - need to subscribe
+    return False, "You've reached the limit of free analyses. Please subscribe to continue using premium features."
+
+async def create_payment_charge(user_id: int, plan_type: str) -> tuple[bool, str, str]:
+    """
+    Create a Coinbase Commerce charge for subscription payment.
+    Returns (success, checkout_url, charge_id)
+    """
+    try:
+        if not COINBASE_API_KEY:
+            return False, "", "Coinbase API key not configured"
+            
+        # Get plan details
+        if plan_type not in SUBSCRIPTION_PLANS:
+            return False, "", "Invalid plan type"
+            
+        plan = SUBSCRIPTION_PLANS[plan_type]
+        
+        # Create a client
+        client = Client(api_key=COINBASE_API_KEY)
+        
+        # Create a unique charge ID
+        charge_id = str(uuid.uuid4())
+        
+        # Create metadata to track the user
+        metadata = {
+            "user_id": str(user_id),
+            "plan_type": plan_type
+        }
+        
+        # Create the charge
+        charge_data = {
+            "name": f"Ecliptica Bot - {plan['name']}",
+            "description": plan['description'],
+            "local_price": {
+                "amount": str(plan['price']),
+                "currency": "USD"
+            },
+            "pricing_type": "fixed_price",
+            "metadata": metadata,
+            "redirect_url": f"https://t.me/your_bot_username?start=payment_{charge_id}",
+            "cancel_url": f"https://t.me/your_bot_username?start=cancel_{charge_id}"
+        }
+        
+        charge = client.charge.create(**charge_data)
+        
+        # Store the payment in our database
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                '''
+                INSERT INTO payments
+                (payment_id, uid, amount, currency, plan_type, status)
+                VALUES ($1, $2, $3, $4, $5, 'pending')
+                ''',
+                charge.id, user_id, plan['price'], 'USD', plan_type
+            )
+            
+        # Return the hosted URL and charge ID
+        return True, charge.hosted_url, charge.id
+        
+    except Exception as e:
+        logging.error(f"Error creating payment charge: {str(e)}")
+        return False, "", str(e)
+
+async def verify_promo_code(code: str) -> bool:
+    """Verify if a promo code is valid."""
+    return code.upper() in PROMO_CODES
 
 # ───────────────────────────── rei request ────────────────────────────────── #
 async def rei_call(prompt: str) -> str:
@@ -525,7 +830,9 @@ INIT_MENU = ReplyKeyboardMarkup(
     [["▶️ Start"]], resize_keyboard=True, one_time_keyboard=True
 )
 MAIN_MENU = ReplyKeyboardMarkup(
-    [["🔧 Setup Profile","📊 Trade"], ["🤖 Ask AI","❓ FAQ"]],
+    [["🔧 Setup Profile", "📊 Trade"], 
+     ["🤖 Ask AI", "❓ FAQ"],
+     ["💰 Subscription", "🎟️ Enter Code"]],
     resize_keyboard=True
 )
 
@@ -561,6 +868,292 @@ async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         • Funding: paid every 8h.
         • Mark price: fair reference.
         • Keep a healthy margin buffer!"""), parse_mode=ParseMode.MARKDOWN)
+
+# ─── Subscription handlers ────────────────────────────────────────────────── #
+async def subscription_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle subscription command and show subscription options."""
+    user_id = update.effective_user.id
+    
+    # Get current subscription status
+    subscription = await get_user_subscription(user_id)
+    
+    if subscription and subscription['is_active']:
+        # User already has an active subscription
+        plan_type = subscription['plan_type']
+        days_remaining = subscription['days_remaining']
+        
+        if subscription['promo_code']:
+            # This is a promo subscription
+            await update.message.reply_text(
+                f"✅ You currently have an active subscription using promo code *{subscription['promo_code']}*.\n\n"
+                f"Your subscription expires in *{days_remaining} days*.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            # Paid subscription
+            plan_name = SUBSCRIPTION_PLANS.get(plan_type, {}).get('name', 'Custom Plan')
+            await update.message.reply_text(
+                f"✅ You currently have an active *{plan_name}* subscription.\n\n"
+                f"Your subscription expires in *{days_remaining} days*.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        # Option to extend/upgrade
+        buttons = [
+            [InlineKeyboardButton("Extend Subscription", callback_data="sub:extend")],
+            [InlineKeyboardButton("Back to Main Menu", callback_data="sub:cancel")]
+        ]
+        markup = InlineKeyboardMarkup(buttons)
+        
+        await update.message.reply_text(
+            "Would you like to extend your subscription?",
+            reply_markup=markup
+        )
+        return SUBSCRIPTION
+    
+    # User doesn't have an active subscription - show plans
+    buttons = []
+    for plan_id, plan in SUBSCRIPTION_PLANS.items():
+        # Create a button for each plan
+        price_text = f"${plan['price']:.2f}"
+        if plan_id == "quarterly":
+            price_text += " (Save 17%)"
+        elif plan_id == "annual":
+            price_text += " (Save 37%)"
+            
+        buttons.append([
+            InlineKeyboardButton(
+                f"{plan['name']} - {price_text}",
+                callback_data=f"sub:select:{plan_id}"
+            )
+        ])
+    
+    # Add promo code option and cancel
+    buttons.append([InlineKeyboardButton("I have a promo code", callback_data="sub:promo")])
+    buttons.append([InlineKeyboardButton("Cancel", callback_data="sub:cancel")])
+    
+    markup = InlineKeyboardMarkup(buttons)
+    
+    # Show usage count for free tier
+    usage_count = 0
+    if subscription:
+        usage_count = subscription['usage_count']
+    
+    remaining = max(0, FREE_ANALYSIS_LIMIT - usage_count)
+    
+    await update.message.reply_text(
+        "📊 *Ecliptica Trading Bot Subscription*\n\n"
+        "Get unlimited access to premium trading analysis and recommendations.\n\n"
+        f"You have used {usage_count}/{FREE_ANALYSIS_LIMIT} free analyses.\n"
+        f"Choose a subscription plan below:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=markup
+    )
+    
+    return SUBSCRIPTION
+
+async def enter_code_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle promo code entry command."""
+    await update.message.reply_text(
+        "Please enter your promo code for free access.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ENTER_CODE
+
+async def handle_code_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Process promo code entry from user."""
+    code = update.message.text.strip().upper()
+    user_id = update.effective_user.id
+    
+    # Verify the code
+    if await verify_promo_code(code):
+        # Valid code, create subscription
+        promo_details = PROMO_CODES[code]
+        success = await create_subscription(user_id, None, None, code)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ Success! Your promo code *{code}* has been activated.\n\n"
+                f"You now have *{promo_details['days']} days* of free access to all premium features.\n\n"
+                f"*Description:* {promo_details['description']}",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=MAIN_MENU
+            )
+        else:
+            await update.message.reply_text(
+                "❌ There was an error activating your promo code. Please try again later.",
+                reply_markup=MAIN_MENU
+            )
+    else:
+        # Invalid code
+        await update.message.reply_text(
+            "❌ Invalid promo code. Please check and try again, or subscribe to a premium plan.",
+            reply_markup=MAIN_MENU
+        )
+    
+    return ConversationHandler.END
+
+async def handle_subscription_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle subscription callback queries."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    if ":" not in query.data:
+        logger.error(f"Invalid subscription callback format: {query.data}")
+        await query.message.reply_text("An error occurred. Please try again.")
+        return ConversationHandler.END
+    
+    action = query.data.split(":", 1)[1]
+    
+    if action.startswith("select:"):
+        # User selected a plan
+        plan_id = action.split(":", 1)[1]
+        
+        if plan_id not in SUBSCRIPTION_PLANS:
+            await query.message.reply_text("Invalid plan selected. Please try again.")
+            return ConversationHandler.END
+            
+        # Create Coinbase charge
+        success, checkout_url, charge_id = await create_payment_charge(user_id, plan_id)
+        
+        if success and checkout_url:
+            # Store the charge ID in user data for reference
+            ctx.user_data["payment_charge_id"] = charge_id
+            
+            # Create payment button
+            button = InlineKeyboardButton("Pay Now", url=checkout_url)
+            markup = InlineKeyboardMarkup([[button]])
+            
+            plan = SUBSCRIPTION_PLANS[plan_id]
+            
+            await query.message.edit_text(
+                f"🔗 *Payment for {plan['name']}*\n\n"
+                f"• Amount: ${plan['price']:.2f} USD\n"
+                f"• Duration: {plan['days']} days\n\n"
+                "Click the button below to complete your payment. Once payment is confirmed, "
+                "your subscription will be activated automatically.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=markup
+            )
+        else:
+            # Payment creation failed
+            await query.message.edit_text(
+                "❌ There was an error setting up the payment. Please try again later."
+            )
+            
+        return ConversationHandler.END
+            
+    elif action == "promo":
+        # User wants to enter promo code
+        await query.message.edit_text("Please enter your promo code:")
+        return ENTER_CODE
+        
+    elif action == "extend":
+        # Handle subscription extension - just show the plans again
+        buttons = []
+        for plan_id, plan in SUBSCRIPTION_PLANS.items():
+            price_text = f"${plan['price']:.2f}"
+            if plan_id == "quarterly":
+                price_text += " (Save 17%)"
+            elif plan_id == "annual":
+                price_text += " (Save 37%)"
+                
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{plan['name']} - {price_text}",
+                    callback_data=f"sub:select:{plan_id}"
+                )
+            ])
+        
+        buttons.append([InlineKeyboardButton("Cancel", callback_data="sub:cancel")])
+        markup = InlineKeyboardMarkup(buttons)
+        
+        await query.message.edit_text(
+            "Select a subscription plan to extend your access:",
+            reply_markup=markup
+        )
+        return SUBSCRIPTION
+        
+    elif action == "cancel":
+        # User cancelled the subscription process
+        await query.message.edit_text("Subscription process cancelled.")
+        return ConversationHandler.END
+        
+    else:
+        logger.warning(f"Unknown subscription action: {action}")
+        await query.message.edit_text("Invalid option. Please try again.")
+        return ConversationHandler.END
+
+async def handle_webhook(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle Coinbase Commerce webhook for payment confirmation."""
+    # This needs to be configured in Railway as a webhook endpoint
+    try:
+        # Get the request data
+        request_data = json.loads(update.message.text)
+        
+        # Verify the webhook signature if available
+        if COINBASE_WEBHOOK_SECRET:
+            signature = request_data.get('signature', '')
+            payload = request_data.get('payload', {})
+            
+            # Verify the signature
+            expected_sig = hmac.new(
+                COINBASE_WEBHOOK_SECRET.encode('utf-8'),
+                json.dumps(payload).encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            if signature != expected_sig:
+                logger.warning("Invalid webhook signature")
+                return
+        
+        # Extract charge information
+        event_type = request_data.get('type', '')
+        if event_type != 'charge:confirmed':
+            # Only process confirmed charges
+            logger.info(f"Ignoring webhook event of type: {event_type}")
+            return
+            
+        # Get the charge data
+        charge_data = request_data.get('data', {}).get('object', {})
+        charge_id = charge_data.get('id', '')
+        metadata = charge_data.get('metadata', {})
+        user_id = metadata.get('user_id', '')
+        plan_type = metadata.get('plan_type', '')
+        
+        if not charge_id or not user_id or not plan_type:
+            logger.error("Missing required data in webhook payload")
+            return
+            
+        # Update payment status in database
+        async with db_pool.acquire() as conn:
+            # Mark payment as completed
+            await conn.execute(
+                '''
+                UPDATE payments
+                SET status = 'completed', completed_at = NOW()
+                WHERE payment_id = $1
+                ''',
+                charge_id
+            )
+            
+            # Create or update subscription
+            await create_subscription(int(user_id), plan_type, charge_id)
+            
+        # Send confirmation message to user
+        plan = SUBSCRIPTION_PLANS.get(plan_type, {})
+        plan_name = plan.get('name', 'Subscription')
+        
+        await ctx.bot.send_message(
+            chat_id=int(user_id),
+            text=f"✅ Payment confirmed! Your *{plan_name}* has been activated. Thank you for subscribing to Ecliptica Trading Bot!",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}")
 
 # ─── Setup wizard with buttons ───────────────────────────────────────────── #
 async def setup_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -727,12 +1320,271 @@ def adjust_for_verbosity(prompt: str, verbosity: str = "balanced") -> str:
     else:  # balanced (default)
         return prompt
 
-# Update the market analysis handler to use verbosity
+# Create keyboard versions for waiting states
+WAITING_MESSAGE = "⏳ Processing request... Please wait."
+WAITING_KEYBOARD = InlineKeyboardMarkup([
+    [InlineKeyboardButton("⏳ Please wait...", callback_data="wait:ignore")]
+])
+
+# Add a function to show waiting state
+async def show_waiting_state(query, message=None):
+    """Replace buttons with waiting indicator."""
+    try:
+        if message is None:
+            message = WAITING_MESSAGE
+            
+        if isinstance(query, Update):
+            # If it's a direct command, just send new message
+            await query.message.reply_text(message)
+            return
+            
+        # For button clicks, try to edit the message
+        try:
+            # Try to edit existing message if it has inline keyboard
+            await query.message.edit_text(
+                f"{query.message.text_html}\n\n{message}",
+                reply_markup=WAITING_KEYBOARD,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            # If edit fails, send a new message
+            logger.debug(f"Couldn't edit message, sending new: {str(e)}")
+            await query.message.reply_text(message)
+    except Exception as e:
+        logger.error(f"Error showing waiting state: {str(e)}")
+        # Don't raise - this is a UI enhancement, not critical functionality
+
+# Update the button_click handler to set waiting states
+async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle button clicks."""
+    query = update.callback_query
+    if not query:
+        logger.error("Received button_click call without callback query")
+        return
+
+    user_id = query.from_user.id
+    logger.info(f"Received callback query with data: {query.data} from user {user_id}")
+    
+    # For wait:ignore callbacks, just acknowledge and do nothing
+    if query.data.startswith("wait:"):
+        await query.answer("Still processing your previous request. Please wait...", show_alert=True)
+        return
+    
+    # Check if user already has a request in progress
+    is_available = await check_user_state(user_id)
+    if not is_available:
+        logger.warning(f"User {user_id} already has a request in progress, ignoring new request")
+        await query.answer("Please wait for your current request to complete", show_alert=True)
+        return
+    
+    try:
+        # Mark user as processing
+        await set_user_processing(user_id, True)
+        
+        # Start watchdog timer for this command
+        start_watchdog()
+        
+        # Always answer callback query first to prevent "loading" state
+        await query.answer()
+        
+        # Split callback data into action and value
+        if ":" not in query.data:
+            logger.error(f"Invalid callback data format: {query.data}")
+            await query.message.reply_text(
+                "Sorry, there was an error. Please try again.",
+                reply_markup=MAIN_MENU
+            )
+            stop_watchdog()
+            await set_user_processing(user_id, False)
+            return
+            
+        action, value = query.data.split(":", 1)
+        logger.debug(f"Processing action: {action}, value: {value}")
+        
+        # Special handling for setup:start action
+        if action == "setup" and value == "start":
+            stop_watchdog()
+            result = await setup_start(query, ctx)
+            await set_user_processing(user_id, False)
+            return result
+            
+        # For all other actions, check profile first
+        profile = await get_user_profile(query.from_user.id)
+        logger.debug(f"Retrieved profile for user {query.from_user.id}: {profile is not None}")
+        
+        if not profile and action != "setup":
+            buttons = [[InlineKeyboardButton("🔧 Setup Profile Now", callback_data="setup:start")]]
+            markup = InlineKeyboardMarkup(buttons)
+            await query.message.reply_text(
+                "⚠️ Please set up your trading profile first!\n\n"
+                "This helps me provide personalized trade suggestions and analysis based on:\n"
+                "• Your experience level\n"
+                "• Capital allocation\n"
+                "• Risk tolerance\n"
+                "• Preferred timeframes\n"
+                "• And more...",
+                reply_markup=markup
+            )
+            stop_watchdog()
+            await set_user_processing(user_id, False)
+            return
+            
+        profile_context = await format_profile_context(profile)
+        logger.debug("Formatted profile context successfully")
+        
+        if action == "analysis":
+            try:
+                analysis_type, asset = value.split(":", 1)
+                logger.info(f"Processing {analysis_type} analysis request for {asset}")
+                
+                if analysis_type == "market":
+                    await handle_market_analysis(query, asset, profile_context, profile)
+                elif analysis_type == "setup":
+                    await handle_trade_setup(query, asset, profile_context, profile)
+                else:
+                    logger.warning(f"Unknown analysis type: {analysis_type}")
+                    await query.message.reply_text(
+                        "Invalid analysis type. Please try again.",
+                        reply_markup=MAIN_MENU
+                    )
+                    
+            except Exception as e:
+                logger.error(f"Error in analysis handler: {str(e)}", exc_info=True)
+                await query.message.reply_text(
+                    "An unexpected error occurred. Please try again later.",
+                    reply_markup=MAIN_MENU
+                )
+        
+        elif action == "trade":
+            logger.info(f"Processing trade action with value: {value}")
+            
+            # Get user's verbosity preference for suggestion prompts
+            verbosity = profile.get('verbosity', 'balanced')
+            
+            if value == "SUGGEST":
+                # Show waiting state
+                await show_waiting_state(query, "🧠 Analyzing market conditions... This may take a minute.")
+                logger.debug("Processing suggestion request")
+                
+                try:
+                    start_time = datetime.now()
+                    
+                    base_prompt = (
+                        "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
+                        f"{profile_context}\n\n"
+                        "Include:\n"
+                        "1. Asset selection and reasoning\n"
+                        "2. Entry strategy with specific levels\n"
+                        "3. Stop loss placement\n"
+                        "4. Take profit targets\n"
+                        "5. Risk:reward ratio\n"
+                        "6. Key market conditions supporting this trade\n"
+                        "7. Compatibility with user's profile"
+                    )
+                    
+                    # Adjust prompt for verbosity
+                    prompt = adjust_for_verbosity(base_prompt, verbosity)
+                    
+                    try:
+                        suggestion = await rei_call(prompt)
+                    except Exception as primary_e:
+                        logger.warning(f"Primary API call failed for suggestion: {str(primary_e)}")
+                        # Use a simple fallback
+                        suggestion = get_fallback_response("", "")
+                    
+                    end_time = datetime.now()
+                    duration = (end_time - start_time).total_seconds()
+                    logger.info(f"Trade suggestion completed in {duration} seconds")
+                    
+                    await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+                except Exception as e:
+                    logger.error(f"Error getting trade suggestion: {str(e)}")
+                    # Use a generic fallback
+                    await query.message.reply_text(
+                        get_fallback_response("", ""),
+                        reply_markup=MAIN_MENU
+                    )
+                
+            elif value == "CUSTOM":
+                logger.debug("Processing custom asset request")
+                await query.message.edit_text("Enter asset symbol (e.g. BTC):")
+                
+            elif value.endswith("-PERP"):
+                logger.debug(f"Processing {value} analysis options")
+                buttons = [
+                    [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{value}")],
+                    [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{value}")]
+                ]
+                markup = InlineKeyboardMarkup(buttons)
+                await query.message.edit_text(
+                    f"Choose analysis type for {value}:",
+                    reply_markup=markup
+                )
+            else:
+                logger.warning(f"Unknown trade value: {value}")
+                await query.message.reply_text(
+                    "Invalid option. Please try again.",
+                    reply_markup=MAIN_MENU
+                )
+        
+        else:
+            logger.warning(f"Unknown action in callback: {action}")
+            await query.message.reply_text(
+                "Invalid option. Please try again.",
+                reply_markup=MAIN_MENU
+            )
+        
+        # Make sure watchdog is stopped before returning
+        stop_watchdog()
+        # Mark user as no longer processing
+        await set_user_processing(user_id, False)
+            
+    except Exception as e:
+        # Make sure watchdog is stopped in case of error
+        stop_watchdog()
+        # Mark user as no longer processing even if there was an error
+        await set_user_processing(user_id, False)
+        logger.error(f"Error in button_click: {str(e)}", exc_info=True)
+        try:
+            await query.message.reply_text(
+                "An error occurred. Please try again or contact support.",
+                reply_markup=MAIN_MENU
+            )
+        except Exception as nested_e:
+            logger.error(f"Failed to send error message: {str(nested_e)}")
+
+# Update the handlers to use the waiting state
 async def handle_market_analysis(query, asset, profile_context, profile):
     """Handle market analysis request with reliable fallbacks."""
     user_id = query.from_user.id
     try:
-        await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
+        # Check subscription access
+        has_access, message = await check_subscription_access(user_id)
+        
+        if not has_access:
+            # User doesn't have access - show subscription options
+            buttons = [[InlineKeyboardButton("Subscribe Now", callback_data="sub:show")]]
+            markup = InlineKeyboardMarkup(buttons)
+            
+            await query.message.reply_text(
+                f"⚠️ {message}",
+                reply_markup=markup
+            )
+            return
+            
+        # Increment usage count if not on a paid plan
+        subscription = await get_user_subscription(user_id)
+        if not subscription or not subscription['is_active']:
+            count = await increment_usage_count(user_id)
+            logger.info(f"User {user_id} analysis count incremented to {count}")
+            
+            # Show free tier message if applicable
+            if message:
+                await query.message.reply_text(f"ℹ️ {message}")
+        
+        # Show waiting state with specific message for this analysis
+        await show_waiting_state(query, f"📊 Analyzing {asset} market conditions... (this may take a minute)")
+        
         logger.debug("Preparing market analysis prompt")
         
         # Get user's verbosity preference
@@ -837,12 +1689,14 @@ async def handle_market_analysis(query, asset, profile_context, profile):
         # Always release the user's processing state
         await set_user_processing(user_id, False)
 
-# Update the trade setup handler to use verbosity
+# Update the trade setup handler to use the waiting state
 async def handle_trade_setup(query, asset, profile_context, profile):
     """Handle trade setup request with reliable fallbacks."""
     user_id = query.from_user.id
     try:
-        await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
+        # Show waiting state with specific message for this setup
+        await show_waiting_state(query, f"🎯 Generating trade setup for {asset}... (this may take a minute)")
+        
         logger.debug("Preparing trade setup prompt")
         
         # Get user's verbosity preference
@@ -1027,198 +1881,6 @@ def get_fallback_response(asset: str = "", analysis_type: str = "") -> str:
     else:
         return (f"I'm having trouble connecting to my analysis service to provide information about {asset}. "
                 f"Please try again in a few minutes, or try a different request.")
-
-# Update the button_click handler to use our new handler function
-async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button clicks."""
-    query = update.callback_query
-    if not query:
-        logger.error("Received button_click call without callback query")
-        return
-
-    user_id = query.from_user.id
-    logger.info(f"Received callback query with data: {query.data} from user {user_id}")
-    
-    # Check if user already has a request in progress
-    is_available = await check_user_state(user_id)
-    if not is_available:
-        logger.warning(f"User {user_id} already has a request in progress, ignoring new request")
-        await query.answer("Please wait for your current request to complete", show_alert=True)
-        return
-    
-    try:
-        # Mark user as processing
-        await set_user_processing(user_id, True)
-        
-        # Start watchdog timer for this command
-        start_watchdog()
-        
-        # Always answer callback query first to prevent "loading" state
-        await query.answer()
-        
-        # Split callback data into action and value
-        if ":" not in query.data:
-            logger.error(f"Invalid callback data format: {query.data}")
-            await query.message.reply_text(
-                "Sorry, there was an error. Please try again.",
-                reply_markup=MAIN_MENU
-            )
-            stop_watchdog()
-            await set_user_processing(user_id, False)
-            return
-            
-        action, value = query.data.split(":", 1)
-        logger.debug(f"Processing action: {action}, value: {value}")
-        
-        # Special handling for setup:start action
-        if action == "setup" and value == "start":
-            stop_watchdog()
-            result = await setup_start(query, ctx)
-            await set_user_processing(user_id, False)
-            return result
-            
-        # For all other actions, check profile first
-        profile = await get_user_profile(query.from_user.id)
-        logger.debug(f"Retrieved profile for user {query.from_user.id}: {profile is not None}")
-        
-        if not profile and action != "setup":
-            buttons = [[InlineKeyboardButton("🔧 Setup Profile Now", callback_data="setup:start")]]
-            markup = InlineKeyboardMarkup(buttons)
-            await query.message.reply_text(
-                "⚠️ Please set up your trading profile first!\n\n"
-                "This helps me provide personalized trade suggestions and analysis based on:\n"
-                "• Your experience level\n"
-                "• Capital allocation\n"
-                "• Risk tolerance\n"
-                "• Preferred timeframes\n"
-                "• And more...",
-                reply_markup=markup
-            )
-            stop_watchdog()
-            await set_user_processing(user_id, False)
-            return
-            
-        profile_context = await format_profile_context(profile)
-        logger.debug("Formatted profile context successfully")
-        
-        if action == "analysis":
-            try:
-                analysis_type, asset = value.split(":", 1)
-                logger.info(f"Processing {analysis_type} analysis request for {asset}")
-                
-                if analysis_type == "market":
-                    await handle_market_analysis(query, asset, profile_context, profile)
-                elif analysis_type == "setup":
-                    await handle_trade_setup(query, asset, profile_context, profile)
-                else:
-                    logger.warning(f"Unknown analysis type: {analysis_type}")
-                    await query.message.reply_text(
-                        "Invalid analysis type. Please try again.",
-                        reply_markup=MAIN_MENU
-                    )
-                    
-            except Exception as e:
-                logger.error(f"Error in analysis handler: {str(e)}", exc_info=True)
-                await query.message.reply_text(
-                    "An unexpected error occurred. Please try again later.",
-                    reply_markup=MAIN_MENU
-                )
-        
-        elif action == "trade":
-            logger.info(f"Processing trade action with value: {value}")
-            
-            # Get user's verbosity preference for suggestion prompts
-            verbosity = profile.get('verbosity', 'balanced')
-            
-            if value == "SUGGEST":
-                logger.debug("Processing suggestion request")
-                await query.message.reply_text("🧠 Analyzing market conditions...")
-                try:
-                    start_time = datetime.now()
-                    
-                    base_prompt = (
-                        "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
-                        f"{profile_context}\n\n"
-                        "Include:\n"
-                        "1. Asset selection and reasoning\n"
-                        "2. Entry strategy with specific levels\n"
-                        "3. Stop loss placement\n"
-                        "4. Take profit targets\n"
-                        "5. Risk:reward ratio\n"
-                        "6. Key market conditions supporting this trade\n"
-                        "7. Compatibility with user's profile"
-                    )
-                    
-                    # Adjust prompt for verbosity
-                    prompt = adjust_for_verbosity(base_prompt, verbosity)
-                    
-                    try:
-                        suggestion = await rei_call(prompt)
-                    except Exception as primary_e:
-                        logger.warning(f"Primary API call failed for suggestion: {str(primary_e)}")
-                        # Use a simple fallback
-                        suggestion = get_fallback_response("", "")
-                    
-                    end_time = datetime.now()
-                    duration = (end_time - start_time).total_seconds()
-                    logger.info(f"Trade suggestion completed in {duration} seconds")
-                    
-                    await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
-                except Exception as e:
-                    logger.error(f"Error getting trade suggestion: {str(e)}")
-                    # Use a generic fallback
-                    await query.message.reply_text(
-                        get_fallback_response("", ""),
-                        reply_markup=MAIN_MENU
-                    )
-                
-            elif value == "CUSTOM":
-                logger.debug("Processing custom asset request")
-                await query.message.edit_text("Enter asset symbol (e.g. BTC):")
-                
-            elif value.endswith("-PERP"):
-                logger.debug(f"Processing {value} analysis options")
-                buttons = [
-                    [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{value}")],
-                    [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{value}")]
-                ]
-                markup = InlineKeyboardMarkup(buttons)
-                await query.message.edit_text(
-                    f"Choose analysis type for {value}:",
-                    reply_markup=markup
-                )
-            else:
-                logger.warning(f"Unknown trade value: {value}")
-                await query.message.reply_text(
-                    "Invalid option. Please try again.",
-                    reply_markup=MAIN_MENU
-                )
-        
-        else:
-            logger.warning(f"Unknown action in callback: {action}")
-            await query.message.reply_text(
-                "Invalid option. Please try again.",
-                reply_markup=MAIN_MENU
-            )
-        
-        # Make sure watchdog is stopped before returning
-        stop_watchdog()
-        # Mark user as no longer processing
-        await set_user_processing(user_id, False)
-            
-    except Exception as e:
-        # Make sure watchdog is stopped in case of error
-        stop_watchdog()
-        # Mark user as no longer processing even if there was an error
-        await set_user_processing(user_id, False)
-        logger.error(f"Error in button_click: {str(e)}", exc_info=True)
-        try:
-            await query.message.reply_text(
-                "An error occurred. Please try again or contact support.",
-                reply_markup=MAIN_MENU
-            )
-        except Exception as nested_e:
-            logger.error(f"Failed to send error message: {str(nested_e)}")
 
 def init_handlers(application: Application) -> None:
     """Initialize all handlers for the application."""

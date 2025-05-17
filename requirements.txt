@@ -4,3 +4,4 @@ python-dotenv
 aiohttp
 psycopg2-binary
 asyncpg  # For async PostgreSQL support
+coinbase-commerce  # For payment processing
