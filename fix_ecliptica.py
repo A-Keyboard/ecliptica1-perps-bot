@@ -1,38 +1,16 @@
-#!/usr/bin/env python3
 """
-Fix script for ecliptica_bot.py to address two issues:
-1. Multiple button clicks while processing a request
-2. Non-trade buttons being treated as trading pairs with -PERP
+Fixes for ecliptica_bot.py:
 
-This script reads the ecliptica_bot.py file, applies fixes, and saves a new version.
+1. Add filtering to handle_custom_asset to prevent "Subscription" and "Enter Code" from being treated as trading pairs
+2. Add state check to all entry points to prevent multiple processing
+
+Apply these changes to ecliptica_bot.py
 """
 
-import re
-import os
-import shutil
-
-def main():
-    # First, create a backup of the original file
-    backup_file = "ecliptica_bot_backup.py"
-    original_file = "ecliptica_bot.py"
-    fixed_file = "ecliptica_bot_fixed.py"
-    
-    # Create backup if it doesn't exist
-    if not os.path.exists(backup_file):
-        print(f"Creating backup of {original_file} to {backup_file}")
-        shutil.copy(original_file, backup_file)
-    
-    # Read the original file
-    with open(original_file, "r") as f:
-        content = f.read()
-    
-    # Apply fixes
-    new_content = content
-    
-    # Fix 1: Update handle_custom_asset to filter non-trading keywords
-    handle_custom_asset_pattern = r"async def handle_custom_asset\(update: Update, ctx: ContextTypes\.DEFAULT_TYPE\) -> None:.*?(?=async def|def )"
-    handle_custom_asset_replacement = '''async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle custom asset input from user."""
+# ---- Fix 1: Modify handle_custom_asset to filter non-trading pairs ----
+def fix_handle_custom_asset():
+    code = """async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    \"\"\"Handle custom asset input from user.\"\"\"
     asset = update.message.text.strip().upper()
     user_id = update.effective_user.id
     logger.info(f"Received custom asset input: {asset} from user {user_id}")
@@ -79,13 +57,13 @@ def main():
         logger.error(f"Error creating analysis options: {str(e)}")
         # Release user processing state on error
         await set_user_processing(user_id, False)
+    """
+    return code
 
-'''
-
-    # Fix 2: Update init_handlers to add proper handlers for subscription and enter code buttons
-    init_handlers_pattern = r"def init_handlers\(application: Application\) -> None:.*?(?=async def|def )"
-    init_handlers_replacement = '''def init_handlers(application: Application) -> None:
-    """Initialize all handlers for the application."""
+# ---- Fix 2: Update handler initialization to add proper handlers for special buttons ----
+def fix_init_handlers():
+    code = """def init_handlers(application: Application) -> None:
+    \"\"\"Initialize all handlers for the application.\"\"\"
     # Setup conversation handler
     setup_conv = ConversationHandler(
         entry_points=[
@@ -102,8 +80,7 @@ def main():
     sub_conv = ConversationHandler(
         entry_points=[
             CommandHandler('subscription', subscription_cmd),
-            MessageHandler(filters.Regex('^💰 Subscription$'), subscription_cmd),
-            CallbackQueryHandler(handle_subscription_callback, pattern=r'^sub:')
+            MessageHandler(filters.Regex('^💰 Subscription$'), subscription_cmd)
         ],
         states={
             SUBSCRIPTION: [CallbackQueryHandler(handle_subscription_callback, pattern=r'^sub:')],
@@ -138,24 +115,17 @@ def main():
     application.add_handler(MessageHandler(filters.Regex('^❓ FAQ$'), faq_cmd))
     application.add_handler(CommandHandler('help', help_cmd))
     application.add_handler(CommandHandler('checkdb', check_db_cmd))
-    application.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
+    application.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis|sub):'))
     
     # Add the custom asset handler as the LAST handler
     # It should only receive messages that aren't caught by any of the above handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
-
-'''
-
-    # Apply the fixes using regex pattern to ensure we replace the right parts
-    new_content = re.sub(handle_custom_asset_pattern, handle_custom_asset_replacement, new_content, flags=re.DOTALL)
-    new_content = re.sub(init_handlers_pattern, init_handlers_replacement, new_content, flags=re.DOTALL)
-    
-    # Write the fixed content to a new file
-    with open(fixed_file, "w") as f:
-        f.write(new_content)
-    
-    print(f"Fixed version has been saved to {fixed_file}")
-    print("Review the changes and then rename to ecliptica_bot.py if satisfied")
+    """
+    return code
 
 if __name__ == "__main__":
-    main() 
+    print("Run the following steps to fix the issues:")
+    print("1. Replace handle_custom_asset function with:")
+    print(fix_handle_custom_asset())
+    print("\n2. Replace init_handlers function with:")
+    print(fix_init_handlers()) 
