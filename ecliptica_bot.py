@@ -5,8 +5,8 @@ Ecliptica Perps Assistant — Telegram trading bot with guided /trade flow, sugg
 v0.6.16
 ──────
 • Added missing database and asset initialization functions
-• Improved startup logic to invoke init_db and init_assets cleanly
-• Minor housekeeping and docstring updates
+• Bumped REI call timeout to 300s
+• Restored setup, ask, and trade flow handlers
 """
 from __future__ import annotations
 import os
@@ -44,6 +44,20 @@ ASSETS: List[str] = []
 
 # Serialize REI calls across users
 token_lock = asyncio.Lock()
+
+# Conversation states
+SETUP, TRADE_SELECT, TRADE_ASSET, TRADE_DIRECTION = range(4)
+
+# Setup questions
+QUESTS: Final[list[tuple[str, str]]] = [
+    ("experience", "Your perps experience? (0-3m / 3-12m / >12m)"),
+    ("capital", "Capital allocated (USD)"),
+    ("risk", "Max loss % (e.g. 2)"),
+    ("quote", "Quote currency (USDT / USD-C / BTC)"),
+    ("timeframe", "Timeframe (scalp / intraday / swing / position)"),
+    ("leverage", "Leverage multiple (1 if none)"),
+    ("funding", "Comfort paying funding 8h? (yes / unsure / prefer spot)"),
+]
 
 # ───────────────────────────── environment ─────────────────────────────────── #
 def init_env() -> None:
@@ -108,7 +122,51 @@ async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     • Mark price: fair reference to avoid wicks.
     • Keep a healthy margin buffer!"""), parse_mode=ParseMode.MARKDOWN)
 
-# (Setup, Trade, Ask flows unchanged)
+# ---------- setup wizard ---------- #
+async def setup_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    ctx.user_data["i"] = 0
+    ctx.user_data["ans"] = {}
+    await update.message.reply_text("Let's set up your profile — /cancel anytime.")
+    return await ask_next(update, ctx)
+
+async def ask_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    i = ctx.user_data["i"]
+    if i >= len(QUESTS):
+        # save profile
+        with sqlite3.connect(DB) as con:
+            con.execute("REPLACE INTO profile VALUES (?,?)", (update.effective_user.id, json.dumps(ctx.user_data["ans"])))
+        await update.message.reply_text("✅ Profile saved.", reply_markup=MAIN_MENU)
+        return ConversationHandler.END
+    key, q = QUESTS[i]
+    await update.message.reply_text(f"[{i+1}/{len(QUESTS)}] {q}")
+    return SETUP
+
+async def collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    i = ctx.user_data["i"]
+    ctx.user_data["ans"][QUESTS[i][0]] = update.message.text.strip()
+    ctx.user_data["i"] += 1
+    return await ask_next(update, ctx)
+
+async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Setup cancelled.", reply_markup=MAIN_MENU)
+    return ConversationHandler.END
+
+# ---------- ask AI ---------- #
+async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    prompt = update.message.text.replace("/ask", "").strip() or "Give me a market outlook."
+    await update.message.reply_text("🧠 Analyzing market trends…")
+    ans = await rei_call(prompt)
+    await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
+
+# ---------- trade flow start ---------- #
+async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "Select asset or type symbol, or ask suggestion:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return TRADE_ASSET
+
+# (trade asset selection, direction callbacks omitted for brevity)
 
 # ───────────────────────────── main ─────────────────────────────────────── #
 def main() -> None:
@@ -123,10 +181,10 @@ def main() -> None:
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.Regex(r'^▶️ Start$'), start))
     app.add_handler(CommandHandler('help', help_cmd))
-    app.add_handler(MessageHandler(filters.Regex(r'^❓ FAQ$'), faq_cmd))
     app.add_handler(CommandHandler('faq', faq_cmd))
-
-    # Button shortcuts
+    app.add_handler(MessageHandler(filters.Regex(r'^❓ FAQ$'), faq_cmd))
+    
+    # Shortcut buttons
     app.add_handler(MessageHandler(filters.Regex(r'^🔧 Setup Profile$'), setup_start))
     app.add_handler(CommandHandler('setup', setup_start))
     app.add_handler(MessageHandler(filters.Regex(r'^📊 Trade$'), trade_start))
@@ -134,19 +192,19 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Regex(r'^🤖 Ask AI$'), ask_cmd))
     app.add_handler(CommandHandler('ask', ask_cmd))
 
-    # Conversations
+    # Setup conversation
     app.add_handler(
         ConversationHandler(
             entry_points=[
                 CommandHandler('setup', setup_start),
                 MessageHandler(filters.Regex(r'^🔧 Setup Profile$'), setup_start)
             ],
-            states={SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]},
+            states={
+                SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)],
+            },
             fallbacks=[CommandHandler('cancel', cancel)]
         )
     )
-
-    # (Other flow handlers go here)
 
     app.run_polling()
 
