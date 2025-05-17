@@ -204,17 +204,53 @@ def init_assets() -> None:
 
 # ───────────────────────────── rei request ────────────────────────────────── #
 async def rei_call(prompt: str) -> str:
-    """Make an async call to REI API with better error handling and retry logic."""
-    logger.info(f"Making REI API call with prompt: {prompt}")
+    """Make an async call to REI API with better error handling, retry logic, and chunking for long prompts."""
+    logger.info(f"Making REI API call with prompt length: {len(prompt)}")
     
+    # Check if prompt is very long
+    if len(prompt) > 2000:
+        logger.info("Long prompt detected, splitting request into context and questions")
+        
+        # Split the prompt into context and questions
+        parts = prompt.split("Include:")
+        if len(parts) == 2:
+            context = parts[0].strip()
+            questions = "Include:" + parts[1].strip()
+            
+            logger.info(f"Splitting prompt: context length {len(context)}, questions length {len(questions)}")
+            
+            # Make the first call with just the context to prime the model
+            logger.info("Making initial context call")
+            try:
+                context_response = await _rei_call_internal(
+                    f"{context}\n\nPlease confirm you understand this context and are ready for questions.",
+                    max_tokens=100
+                )
+                logger.info(f"Context call successful: {context_response[:50]}...")
+            except Exception as e:
+                logger.error(f"Context call failed: {str(e)}")
+                # Continue anyway to the main call
+            
+            # Now make the main call with reference to the context
+            logger.info("Making main call with questions")
+            return await _rei_call_internal(
+                f"Using the context I provided earlier about {context[:50]}...\n\n{questions}", 
+                max_tokens=4000
+            )
+        
+    # For shorter prompts, just make a regular call
+    return await _rei_call_internal(prompt)
+
+async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
+    """Internal implementation of the REI API call with retries."""
     headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
     body = {
         "model": "rei-core-chat-001",
         "temperature": 0.2,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 2000,  # Ensure we get complete responses
-        "response_format": {"type": "text"},  # Explicitly request text responses
-        "stream": False  # Ensure we get complete responses
+        "max_tokens": max_tokens,
+        "response_format": {"type": "text"},
+        "stream": False
     }
     
     logger.debug(f"Request headers (excluding auth): {{'Content-Type': {headers['Content-Type']}}}")
@@ -227,14 +263,14 @@ async def rei_call(prompt: str) -> str:
     
     while retry_count <= max_retries:
         try:
-            # Use a longer timeout (600 seconds = 10 minutes)
+            # Use a timeout of 90 seconds to stay under Cloudflare's ~100 second limit
             logger.info(f"REI API call attempt {retry_count + 1}/{max_retries + 1}")
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                 "https://api.reisearch.box/v1/chat/completions",
                     headers=headers,
                     json=body,
-                    timeout=600  # Increased from 300 to 600 seconds
+                    timeout=90  # Reduced from 600 to 90 seconds to avoid Cloudflare timeout
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
@@ -243,6 +279,8 @@ async def rei_call(prompt: str) -> str:
                             raise Exception("Invalid API key or unauthorized access")
                         elif resp.status == 404:
                             raise Exception("Agent not found")
+                        elif resp.status == 524:
+                            raise Exception(f"Cloudflare timeout (524) - origin server took too long to respond")
                         else:
                             raise Exception(f"REI API returned status {resp.status}")
                     
@@ -287,6 +325,20 @@ async def rei_call(prompt: str) -> str:
             logger.error(f"Invalid JSON response from REI API: {str(e)}")
             raise
         except Exception as e:
+            # Check if it's a Cloudflare timeout error
+            if "524" in str(e):
+                logger.warning(f"Cloudflare timeout detected on attempt {retry_count + 1}")
+                last_error = e
+                retry_count += 1
+                if retry_count <= max_retries:
+                    logger.info(f"Retrying with a shorter prompt in 5 seconds...")
+                    # If it's a retry for a Cloudflare timeout, simplify the prompt
+                    if retry_count > 0 and len(prompt) > 500:
+                        prompt = prompt[:500] + "...\n\nPlease provide a concise response due to previous timeout issues."
+                        body["messages"][0]["content"] = prompt
+                        body["max_tokens"] = min(max_tokens, 1000)  # Reduce token count for faster response
+                    await asyncio.sleep(5)
+                continue
             logger.error(f"Unexpected error in rei_call: {str(e)}", exc_info=True)
             raise
     
