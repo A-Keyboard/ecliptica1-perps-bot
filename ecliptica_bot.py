@@ -779,6 +779,68 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     reply_markup=MAIN_MENU
                 )
         
+        elif action == "trade":
+            logger.info(f"Processing trade action with value: {value}")
+            
+            if value == "SUGGEST":
+                logger.debug("Processing suggestion request")
+                await query.message.reply_text("🧠 Analyzing market conditions...")
+                try:
+                    start_time = datetime.now()
+                    suggestion = await rei_call(
+                        "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
+                        f"{profile_context}\n\n"
+                        "Include:\n"
+                        "1. Asset selection and reasoning\n"
+                        "2. Entry strategy with specific levels\n"
+                        "3. Stop loss placement\n"
+                        "4. Take profit targets\n"
+                        "5. Risk:reward ratio\n"
+                        "6. Key market conditions supporting this trade\n"
+                        "7. Compatibility with user's profile"
+                    )
+                    end_time = datetime.now()
+                    duration = (end_time - start_time).total_seconds()
+                    logger.info(f"Trade suggestion completed in {duration} seconds")
+                    
+                    await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+                except Exception as e:
+                    logger.error(f"Error getting trade suggestion: {str(e)}")
+                    # Use a generic fallback
+                    await query.message.reply_text(
+                        get_fallback_response("", ""),
+                        reply_markup=MAIN_MENU
+                    )
+                
+            elif value == "CUSTOM":
+                logger.debug("Processing custom asset request")
+                await query.message.edit_text("Enter asset symbol (e.g. BTC):")
+                
+            elif value.endswith("-PERP"):
+                logger.debug(f"Processing {value} analysis options")
+                buttons = [
+                    [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{value}")],
+                    [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{value}")]
+                ]
+                markup = InlineKeyboardMarkup(buttons)
+                await query.message.edit_text(
+                    f"Choose analysis type for {value}:",
+                    reply_markup=markup
+                )
+            else:
+                logger.warning(f"Unknown trade value: {value}")
+                await query.message.reply_text(
+                    "Invalid option. Please try again.",
+                    reply_markup=MAIN_MENU
+                )
+        
+        else:
+            logger.warning(f"Unknown action in callback: {action}")
+            await query.message.reply_text(
+                "Invalid option. Please try again.",
+                reply_markup=MAIN_MENU
+            )
+        
         # Make sure watchdog is stopped before returning
         stop_watchdog()
             
