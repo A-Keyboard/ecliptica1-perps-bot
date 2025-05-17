@@ -656,6 +656,7 @@ async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 async def main() -> None:
     """Start the bot."""
     logger.info("Starting bot")
+    
     try:
         # Initialize environment and database
         init_env()
@@ -675,8 +676,7 @@ async def main() -> None:
             states={
                 SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
             },
-            fallbacks=[CommandHandler('cancel', cancel)],
-            per_message=False  # Changed from True to False
+            fallbacks=[CommandHandler('cancel', cancel)]
         )
         
         # Add handlers in specific order
@@ -700,22 +700,20 @@ async def main() -> None:
         
         logger.info("All handlers registered")
 
-        # Start polling
-        logger.info("Starting polling")
+        # Start polling with proper shutdown handling
         await app.initialize()
         await app.start()
-        await app.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)  # Added close_loop=False
-        
+        await app.run_polling(allowed_updates=Update.ALL_TYPES)
+
     except Exception as e:
         logger.error(f"Error in main: {str(e)}", exc_info=True)
+        raise
     finally:
-        # Properly shutdown the application
-        try:
-            if 'app' in locals():
-                await app.stop()
-                await app.shutdown()
-        except Exception as e:
-            logger.error(f"Error during shutdown: {str(e)}")
+        logger.info("Shutting down...")
+        if 'app' in locals():
+            await app.shutdown()
+        if db_pool:
+            await db_pool.close()
 
 async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to check database contents"""
@@ -750,26 +748,31 @@ async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("❌ Error checking database")
 
 def run_bot():
-    """Run the bot with proper asyncio handling"""
+    """Entry point for the bot."""
     try:
-        # Get or create an event loop
+        # Get the current event loop or create a new one
         try:
             loop = asyncio.get_running_loop()
+            logger.info("Using existing event loop")
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        
+            logger.info("Created new event loop")
+
         # Run the main function
         loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot stopped due to error: {str(e)}", exc_info=True)
     finally:
         try:
+            loop = asyncio.get_event_loop()
+            tasks = asyncio.all_tasks(loop)
+            for task in tasks:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
             loop.close()
         except Exception as e:
-            logger.error(f"Error closing event loop: {str(e)}")
+            logger.error(f"Error during cleanup: {str(e)}", exc_info=True)
 
 if __name__ == '__main__':
     run_bot()
