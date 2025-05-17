@@ -286,6 +286,35 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=MAIN_MENU
         )
 
+async def get_user_profile(user_id: int) -> dict:
+    """Get user profile from database."""
+    try:
+        with sqlite3.connect(DB) as con:
+            cursor = con.cursor()
+            cursor.execute("SELECT data FROM profile WHERE uid = ?", (user_id,))
+            result = cursor.fetchone()
+            if result:
+                return json.loads(result[0])
+    except Exception as e:
+        logger.error(f"Error fetching user profile: {str(e)}")
+    return None
+
+async def format_profile_context(profile: dict) -> str:
+    """Format user profile into context string for REI prompts."""
+    if not profile:
+        return ""
+        
+    return (
+        "\nUser Profile Context:\n"
+        f"- Experience Level: {profile.get('experience', 'unknown')}\n"
+        f"- Capital: {profile.get('capital', 'unknown')} USD\n"
+        f"- Risk Tolerance: {profile.get('risk', 'unknown')}\n"
+        f"- Preferred Quote: {profile.get('quote', 'unknown')}\n"
+        f"- Trading Timeframe: {profile.get('timeframe', 'unknown')}\n"
+        f"- Max Leverage: {profile.get('leverage', 'unknown')}\n"
+        f"- Funding Rate Preference: {profile.get('funding', 'unknown')}\n"
+    )
+
 async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button clicks."""
     query = update.callback_query
@@ -298,6 +327,10 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         # Always answer callback query first to prevent "loading" state
         await query.answer()
+        
+        # Get user profile for context
+        profile = await get_user_profile(query.from_user.id)
+        profile_context = await format_profile_context(profile)
         
         # Split callback data into action and value
         if ":" not in query.data:
@@ -316,14 +349,16 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 await query.message.reply_text("🧠 Analyzing market conditions...")
                 try:
                     suggestion = await rei_call(
-                        "Based on current market conditions, suggest a high-probability trade setup.\n\n"
+                        "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
+                        f"{profile_context}\n\n"
                         "Include:\n"
                         "1. Asset selection and reasoning\n"
                         "2. Entry strategy with specific levels\n"
                         "3. Stop loss placement\n"
                         "4. Take profit targets\n"
                         "5. Risk:reward ratio\n"
-                        "6. Key market conditions supporting this trade"
+                        "6. Key market conditions supporting this trade\n"
+                        "7. Compatibility with user's profile"
                     )
                     await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
                 except Exception as e:
@@ -358,7 +393,8 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
                     try:
                         response = await rei_call(
-                            f"Provide a detailed trade setup analysis for {asset}.\n\n"
+                            f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
+                            f"{profile_context}\n\n"
                             f"Include:\n"
                             f"1. Current Market Context\n"
                             f"   - Price action summary\n"
@@ -368,15 +404,16 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                             f"   - Entry zone/price with reasoning\n"
                             f"   - Stop loss placement and rationale\n"
                             f"   - Take profit targets (multiple levels)\n"
-                            f"   - Position sizing suggestion\n\n"
+                            f"   - Position sizing based on user's capital and risk\n\n"
                             f"3. Risk Management\n"
                             f"   - Risk:reward ratio\n"
-                            f"   - Maximum risk per trade\n"
+                            f"   - Maximum risk per trade (based on user's preference)\n"
                             f"   - Key invalidation points\n\n"
                             f"4. Important Considerations\n"
                             f"   - Potential catalysts\n"
                             f"   - Key risks to watch\n"
-                            f"   - Timeframe for the setup"
+                            f"   - Timeframe alignment with user's preference\n"
+                            f"   - Funding rate implications"
                         )
                     except Exception as e:
                         logger.error(f"Error generating trade setup: {str(e)}")
@@ -390,10 +427,11 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
                     try:
                         response = await rei_call(
-                            f"Provide a comprehensive market analysis for {asset}.\n\n"
+                            f"Provide a comprehensive market analysis for {asset}, considering the user's profile."
+                            f"{profile_context}\n\n"
                             f"Include:\n"
                             f"1. Technical Analysis\n"
-                            f"   - Trend analysis (multiple timeframes)\n"
+                            f"   - Trend analysis (focus on {profile.get('timeframe', 'all')} timeframe)\n"
                             f"   - Support/resistance levels\n"
                             f"   - Chart patterns and formations\n"
                             f"   - Key technical indicators\n\n"
@@ -405,13 +443,14 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                             f"3. Fundamental Analysis\n"
                             f"   - Recent news/developments\n"
                             f"   - Network metrics (if applicable)\n"
-                            f"   - Funding rates\n"
+                            f"   - Funding rates (important for user's preference)\n"
                             f"   - Market sentiment\n\n"
                             f"4. Risk Assessment\n"
                             f"   - Volatility analysis\n"
                             f"   - Liquidity conditions\n"
                             f"   - Potential risks/catalysts\n"
-                            f"   - Correlation with market"
+                            f"   - Correlation with market\n"
+                            f"   - Suitability for user's risk profile"
                         )
                     except Exception as e:
                         logger.error(f"Error generating market analysis: {str(e)}")
