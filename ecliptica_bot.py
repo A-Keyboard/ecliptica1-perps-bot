@@ -211,8 +211,14 @@ async def rei_call(prompt: str) -> str:
     body = {
         "model": "rei-core-chat-001",
         "temperature": 0.2,
-        "messages": [{"role": "user", "content": prompt}]
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 2000,  # Ensure we get complete responses
+        "response_format": {"type": "text"},  # Explicitly request text responses
+        "stream": False  # Ensure we get complete responses
     }
+    
+    logger.debug(f"Request headers (excluding auth): {{'Content-Type': {headers['Content-Type']}}}")
+    logger.debug(f"Request body: {json.dumps(body, indent=2)}")
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -225,20 +231,47 @@ async def rei_call(prompt: str) -> str:
                 if resp.status != 200:
                     error_text = await resp.text()
                     logger.error(f"REI API error: Status {resp.status}, Response: {error_text}")
-                    raise Exception(f"REI API returned status {resp.status}")
+                    if resp.status == 401:
+                        raise Exception("Invalid API key or unauthorized access")
+                    elif resp.status == 404:
+                        raise Exception("Agent not found")
+                    else:
+                        raise Exception(f"REI API returned status {resp.status}")
                 
-                data = await resp.json()
-                if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
+                try:
+                    data = await resp.json()
+                    logger.debug(f"API Response: {json.dumps(data, indent=2)}")
+                except json.JSONDecodeError as e:
+                    raw_response = await resp.text()
+                    logger.error(f"Failed to parse JSON response. Raw response: {raw_response}")
+                    raise
+                
+                if not data.get("choices") or not data["choices"][0].get("message"):
                     logger.error(f"Unexpected REI API response format: {data}")
                     raise Exception("Invalid response format from REI API")
                 
-                return data["choices"][0]["message"]["content"].strip()
+                message = data["choices"][0]["message"]
+                if message.get("tool_calls"):
+                    # Handle tool calls if present
+                    logger.error(f"Received tool calls in response, which we don't support: {message['tool_calls']}")
+                    raise Exception("Received tool calls response which is not supported")
+                
+                if not message.get("content"):
+                    logger.error(f"No content in message: {message}")
+                    raise Exception("No content in API response")
+                    
+                content = message["content"].strip()
+                logger.info(f"Successfully received response of length: {len(content)}")
+                return content
                 
     except aiohttp.ClientError as e:
         logger.error(f"Network error calling REI API: {str(e)}")
         raise Exception(f"Network error: {str(e)}")
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON response from REI API: {str(e)}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in rei_call: {str(e)}", exc_info=True)
         raise
 
 # ───────────────────────────── telegram callbacks ────────────────────────── #
