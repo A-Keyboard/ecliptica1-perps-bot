@@ -233,12 +233,12 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     
     # Create keyboard with top volume assets and additional options
     buttons = [
-        [InlineKeyboardButton(f"📈 {asset}", callback_data=f"trade_asset_{asset}")]
+        [InlineKeyboardButton(f"📈 {asset}", callback_data=f"trade:{asset}")]
         for asset in top_assets
     ]
     buttons.extend([
-        [InlineKeyboardButton("🎯 Get Trade Suggestion", callback_data="trade_suggest")],
-        [InlineKeyboardButton("🔍 Custom Asset", callback_data="trade_custom")]
+        [InlineKeyboardButton("🎯 Get Trade Suggestion", callback_data="trade:suggest")],
+        [InlineKeyboardButton("🔍 Custom Asset", callback_data="trade:custom")]
     ])
     
     markup = InlineKeyboardMarkup(buttons)
@@ -249,42 +249,51 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     return TRADE_ASSET
 
 async def handle_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    if not query:
-        # Handle direct text input for custom asset
-        asset = update.message.text.strip().upper()
-        if not asset.endswith('-PERP'):
-            asset = f"{asset}-PERP"
-        ctx.user_data['asset'] = asset
-        return await provide_trade_options(update.message, ctx)
+    try:
+        query = update.callback_query
+        if not query:
+            # Handle direct text input for custom asset
+            asset = update.message.text.strip().upper()
+            if not asset.endswith('-PERP'):
+                asset = f"{asset}-PERP"
+            ctx.user_data['asset'] = asset
+            return await provide_trade_options(update.message, ctx)
+            
+        await query.answer()
+        logging.info(f"Received callback data: {query.data}")
         
-    await query.answer()
-    data = query.data
-    
-    if data.startswith('trade_asset_'):
-        asset = data.replace('trade_asset_', '')
-        ctx.user_data['asset'] = asset
-        return await provide_trade_options(query.message, ctx)
-    elif data == 'trade_suggest':
-        return await provide_trade_suggestion(query.message, ctx)
-    elif data == 'trade_custom':
-        await query.message.reply_text(
-            "Enter asset symbol (e.g. BTC, ETH):\nI'll add -PERP automatically."
-        )
-        return TRADE_CUSTOM
-    elif data == 'trade_setup':
-        return await generate_trade_setup(query.message, ctx)
-    elif data == 'trade_analysis':
-        return await provide_market_analysis(query.message, ctx)
-    else:
-        await query.message.reply_text("Invalid selection. Please try again.")
+        if not query.data.startswith('trade:'):
+            await query.message.reply_text("Invalid selection. Please try again.")
+            return ConversationHandler.END
+            
+        action = query.data.split(':', 1)[1]  # Split only on first colon
+        
+        if action == 'suggest':
+            return await provide_trade_suggestion(query.message, ctx)
+        elif action == 'custom':
+            await query.message.reply_text(
+                "Enter asset symbol (e.g. BTC, ETH):\nI'll add -PERP automatically."
+            )
+            return TRADE_CUSTOM
+        elif action == 'setup':
+            return await generate_trade_setup(query.message, ctx)
+        elif action == 'analysis':
+            return await provide_market_analysis(query.message, ctx)
+        else:  # Must be an asset selection
+            ctx.user_data['asset'] = action
+            return await provide_trade_options(query.message, ctx)
+            
+    except Exception as e:
+        logging.error(f"Error in handle_trade: {str(e)}")
+        if update.callback_query:
+            await update.callback_query.answer("An error occurred")
         return ConversationHandler.END
 
 async def provide_trade_options(message: Message, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     asset = ctx.user_data.get('asset')
     buttons = [
-        [InlineKeyboardButton("📊 Get Trade Setup", callback_data="trade_setup")],
-        [InlineKeyboardButton("📈 Market Analysis", callback_data="trade_analysis")],
+        [InlineKeyboardButton("📊 Get Trade Setup", callback_data="trade:setup")],
+        [InlineKeyboardButton("📈 Market Analysis", callback_data="trade:analysis")],
     ]
     markup = InlineKeyboardMarkup(buttons)
     await message.reply_text(
@@ -424,17 +433,17 @@ def main() -> None:
             ],
             states={
                 TRADE_ASSET: [
-                    CallbackQueryHandler(handle_trade),  # Handle all callbacks
+                    CallbackQueryHandler(handle_trade, pattern=r'^trade:'),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, trade_start)
                 ],
                 TRADE_CUSTOM: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_trade)
                 ],
                 TRADE_SETUP: [
-                    CallbackQueryHandler(handle_trade),  # Handle all callbacks
+                    CallbackQueryHandler(handle_trade, pattern=r'^trade:'),
                 ],
                 TRADE_ANALYSIS: [
-                    CallbackQueryHandler(handle_trade),  # Handle all callbacks
+                    CallbackQueryHandler(handle_trade, pattern=r'^trade:'),
                 ]
             },
             fallbacks=[CommandHandler('cancel', cancel)]
