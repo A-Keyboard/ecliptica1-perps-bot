@@ -676,7 +676,7 @@ async def main() -> None:
             SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
         },
         fallbacks=[CommandHandler('cancel', cancel)],
-        per_message=True  # Add this to fix the warning
+        per_message=False  # Changed back to False as we have mixed handlers
     )
     
     # Add handlers in specific order
@@ -699,7 +699,23 @@ async def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
     
     logger.info("All handlers registered")
-    return app
+    logger.info("Starting polling")
+    
+    try:
+        await app.initialize()
+        await app.start()
+        await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.error(f"Error during polling: {str(e)}", exc_info=True)
+        raise
+    finally:
+        logger.info("Stopping application...")
+        try:
+            if db_pool:
+                await db_pool.close()
+            await app.stop()
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}", exc_info=True)
 
 async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to check database contents"""
@@ -735,14 +751,8 @@ async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 if __name__ == '__main__':
     try:
-        # Create and run application
-        app = asyncio.run(main())
-        logger.info("Starting polling")
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot stopped due to error: {str(e)}", exc_info=True)
-    finally:
-        if 'app' in locals():
-            app.stop()
