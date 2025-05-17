@@ -92,6 +92,7 @@ QUESTS: Final[List[tuple[str, str]]] = [
     ("timeframe",  "Timeframe"),
     ("leverage",   "Leverage multiple"),
     ("funding",    "Comfort paying funding 8h?"),
+    ("verbosity",  "Response detail level?"),
 ]
 OPTIONS: Final[Dict[str, List[str]]] = {
     "experience": ["0-3m", "3-12m", ">12m"],
@@ -101,6 +102,7 @@ OPTIONS: Final[Dict[str, List[str]]] = {
     "timeframe":  ["scalp", "intraday", "swing", "position"],
     "leverage":   ["1x", "3x", "5x", "10x"],
     "funding":    ["yes", "unsure", "prefer spot"],
+    "verbosity":  ["brief", "balanced", "detailed"],
 }
 
 # Add new constants
@@ -712,7 +714,292 @@ async def format_profile_context(profile: dict) -> str:
         f"- Trading Timeframe: {profile.get('timeframe', 'unknown')}\n"
         f"- Max Leverage: {profile.get('leverage', 'unknown')}\n"
         f"- Funding Rate Preference: {profile.get('funding', 'unknown')}\n"
+        f"- Preferred Response Detail: {profile.get('verbosity', 'balanced')}\n"
     )
+
+# Helper function to adjust prompt based on verbosity
+def adjust_for_verbosity(prompt: str, verbosity: str = "balanced") -> str:
+    """Adjust the prompt based on user's verbosity preference"""
+    if verbosity == "brief":
+        return f"{prompt}\n\nPlease provide a concise and brief response focusing only on the most important points. Aim for clarity and brevity over comprehensiveness."
+    elif verbosity == "detailed":
+        return f"{prompt}\n\nPlease provide a comprehensive and detailed response covering all aspects thoroughly. Include additional context and explanations where helpful."
+    else:  # balanced (default)
+        return prompt
+
+# Update the market analysis handler to use verbosity
+async def handle_market_analysis(query, asset, profile_context, profile):
+    """Handle market analysis request with reliable fallbacks."""
+    user_id = query.from_user.id
+    try:
+        await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
+        logger.debug("Preparing market analysis prompt")
+        
+        # Get user's verbosity preference
+        verbosity = profile.get('verbosity', 'balanced')
+        logger.info(f"Using {verbosity} verbosity for user {user_id}")
+        
+        base_prompt = (
+            f"Provide a comprehensive market analysis for {asset}, considering the user's profile."
+            f"{profile_context}\n\n"
+            f"Include:\n"
+            f"1. Technical Analysis\n"
+            f"   - Trend analysis (focus on {profile.get('timeframe', 'all')} timeframe)\n"
+            f"   - Support/resistance levels\n"
+            f"   - Chart patterns and formations\n"
+            f"   - Key technical indicators\n\n"
+            f"2. Market Structure\n"
+            f"   - Current market phase\n"
+            f"   - Recent price action\n"
+            f"   - Volume profile\n"
+            f"   - Market dominance\n\n"
+            f"3. Fundamental Analysis\n"
+            f"   - Recent news/developments\n"
+            f"   - Network metrics (if applicable)\n"
+            f"   - Funding rates (important for user's preference)\n"
+            f"   - Market sentiment\n\n"
+            f"4. Risk Assessment\n"
+            f"   - Volatility analysis\n"
+            f"   - Liquidity conditions\n"
+            f"   - Potential risks/catalysts\n"
+            f"   - Correlation with market\n"
+            f"   - Suitability for user's risk profile"
+        )
+        
+        # Adjust prompt based on verbosity
+        prompt = adjust_for_verbosity(base_prompt, verbosity)
+        
+        logger.debug("Calling REI API for market analysis")
+        start_time = datetime.now()
+        logger.debug(f"Starting REI API call at {start_time}")
+        
+        # Try primary API first
+        try:
+            response = await rei_call(prompt)
+            logger.info("Primary API call succeeded")
+        except Exception as primary_e:
+            logger.warning(f"Primary API call failed: {str(primary_e)}")
+            
+            # Try alternative API
+            try:
+                logger.info("Trying alternative API endpoint")
+                # For brevity, simplify the prompt even more
+                shorter_prompt_base = (
+                    f"Provide a market analysis for {asset} with these key points:\n"
+                    f"- Current trend and price action\n"
+                    f"- Key support/resistance levels\n"
+                    f"- Technical indicators and patterns\n"
+                    f"- Market sentiment and outlook\n"
+                    f"- Risk assessment and recommendation"
+                )
+                shorter_prompt = adjust_for_verbosity(shorter_prompt_base, verbosity)
+                response = await rei_call_alternative(shorter_prompt)
+                logger.info("Alternative API call succeeded")
+            except Exception as alt_e:
+                logger.error(f"Alternative API also failed: {str(alt_e)}")
+                # Fall back to static response
+                response = get_fallback_response(asset, "market")
+                logger.info("Using static fallback response")
+        
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.info(f"Total processing time: {duration} seconds")
+        
+        # Split response into chunks if too long
+        if len(response) > 4096:
+            logger.debug("Response too long, splitting into chunks")
+            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
+            for i, chunk in enumerate(chunks):
+                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
+                try:
+                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+                except Exception as chunk_e:
+                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
+                    # If markdown fails, try sending without parsing
+                    await query.message.reply_text(chunk)
+        else:
+            logger.debug("Sending single response message")
+            try:
+                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+            except Exception as send_e:
+                logger.error(f"Error sending response with markdown: {str(send_e)}")
+                # If markdown fails, try sending without parsing
+                await query.message.reply_text(response)
+                
+    except Exception as e:
+        logger.error(f"Complete failure in market analysis: {str(e)}", exc_info=True)
+        # Last resort fallback
+        await query.message.reply_text(
+            get_fallback_response(asset, "market"),
+            reply_markup=MAIN_MENU
+        )
+    finally:
+        # Always release the user's processing state
+        await set_user_processing(user_id, False)
+
+# Update the trade setup handler to use verbosity
+async def handle_trade_setup(query, asset, profile_context, profile):
+    """Handle trade setup request with reliable fallbacks."""
+    user_id = query.from_user.id
+    try:
+        await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
+        logger.debug("Preparing trade setup prompt")
+        
+        # Get user's verbosity preference
+        verbosity = profile.get('verbosity', 'balanced')
+        logger.info(f"Using {verbosity} verbosity for user {user_id}")
+        
+        base_prompt = (
+            f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
+            f"{profile_context}\n\n"
+            f"Include:\n"
+            f"1. Current Market Context\n"
+            f"   - Price action summary\n"
+            f"   - Key levels in play\n"
+            f"   - Market structure\n\n"
+            f"2. Trade Setup Details\n"
+            f"   - Entry zone/price with reasoning\n"
+            f"   - Stop loss placement and rationale\n"
+            f"   - Take profit targets (multiple levels)\n"
+            f"   - Position sizing based on user's capital and risk\n\n"
+            f"3. Risk Management\n"
+            f"   - Risk:reward ratio\n"
+            f"   - Maximum risk per trade (based on user's preference)\n"
+            f"   - Key invalidation points\n\n"
+            f"4. Important Considerations\n"
+            f"   - Potential catalysts\n"
+            f"   - Key risks to watch\n"
+            f"   - Timeframe alignment with user's preference\n"
+            f"   - Funding rate implications"
+        )
+        
+        # Adjust prompt based on verbosity
+        prompt = adjust_for_verbosity(base_prompt, verbosity)
+        
+        logger.debug("Calling REI API for trade setup")
+        start_time = datetime.now()
+        logger.debug(f"Starting REI API call at {start_time}")
+        
+        # Try primary API first
+        try:
+            response = await rei_call(prompt)
+            logger.info("Primary API call succeeded")
+        except Exception as primary_e:
+            logger.warning(f"Primary API call failed: {str(primary_e)}")
+            
+            # Try alternative API
+            try:
+                logger.info("Trying alternative API endpoint")
+                # For brevity, simplify the prompt even more
+                shorter_prompt_base = (
+                    f"Provide a trade setup for {asset} with these key points:\n"
+                    f"- Current market context and price action\n"
+                    f"- Entry zone/price with reasoning\n"
+                    f"- Stop loss placement and rationale\n"
+                    f"- Take profit targets\n"
+                    f"- Risk management considerations"
+                )
+                shorter_prompt = adjust_for_verbosity(shorter_prompt_base, verbosity)
+                response = await rei_call_alternative(shorter_prompt)
+                logger.info("Alternative API call succeeded")
+            except Exception as alt_e:
+                logger.error(f"Alternative API also failed: {str(alt_e)}")
+                # Fall back to static response
+                response = get_fallback_response(asset, "setup")
+                logger.info("Using static fallback response")
+        
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.info(f"Total processing time: {duration} seconds")
+        
+        # Split response into chunks if too long
+        if len(response) > 4096:
+            logger.debug("Response too long, splitting into chunks")
+            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
+            for i, chunk in enumerate(chunks):
+                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
+                try:
+                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+                except Exception as chunk_e:
+                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
+                    # If markdown fails, try sending without parsing
+                    await query.message.reply_text(chunk)
+        else:
+            logger.debug("Sending single response message")
+            try:
+                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+            except Exception as send_e:
+                logger.error(f"Error sending response with markdown: {str(send_e)}")
+                # If markdown fails, try sending without parsing
+                await query.message.reply_text(response)
+                
+    except Exception as e:
+        logger.error(f"Complete failure in trade setup: {str(e)}", exc_info=True)
+        # Last resort fallback
+        await query.message.reply_text(
+            get_fallback_response(asset, "setup"),
+            reply_markup=MAIN_MENU
+        )
+    finally:
+        # Always release the user's processing state
+        await set_user_processing(user_id, False)
+
+async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle custom asset input from user."""
+    asset = update.message.text.strip().upper()
+    logger.info(f"Received custom asset input: {asset}")
+    
+    if not asset:
+        await update.message.reply_text("Please enter a valid asset symbol.")
+        return
+        
+    # Format the asset with -PERP suffix if not already present
+    if not asset.endswith("-PERP"):
+        asset = f"{asset}-PERP"
+    
+    # Create analysis options buttons
+    buttons = [
+        [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{asset}")],
+        [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{asset}")]
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+    
+    await update.message.reply_text(
+        f"Choose analysis type for {asset}:",
+        reply_markup=markup
+    )
+
+async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to check database contents"""
+    try:
+        if not db_pool:
+            await update.message.reply_text("❌ Database not connected")
+            return
+            
+        async with db_pool.acquire() as conn:
+            # Get total number of profiles
+            count = await conn.fetchval('SELECT COUNT(*) FROM profile')
+            
+            # Get last 5 profiles
+            rows = await conn.fetch('''
+                SELECT uid, data->>'experience' as exp, 
+                       data->>'capital' as cap,
+                       data->>'timeframe' as tf
+                FROM profile 
+                ORDER BY uid DESC 
+                LIMIT 5
+            ''')
+            
+            # Format message
+            msg = f"📊 Database Status:\n\nTotal Profiles: {count}\n\nLast 5 profiles:"
+            for row in rows:
+                msg += f"\n• User {row['uid']}: {row['exp']}, {row['cap']}, {row['tf']}"
+            
+            await update.message.reply_text(msg)
+            
+    except Exception as e:
+        logger.error(f"Error checking database: {str(e)}")
+        await update.message.reply_text("❌ Error checking database")
 
 # Add a fallback response function
 def get_fallback_response(asset: str = "", analysis_type: str = "") -> str:
@@ -840,25 +1127,33 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         elif action == "trade":
             logger.info(f"Processing trade action with value: {value}")
             
+            # Get user's verbosity preference for suggestion prompts
+            verbosity = profile.get('verbosity', 'balanced')
+            
             if value == "SUGGEST":
                 logger.debug("Processing suggestion request")
                 await query.message.reply_text("🧠 Analyzing market conditions...")
                 try:
                     start_time = datetime.now()
                     
+                    base_prompt = (
+                        "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
+                        f"{profile_context}\n\n"
+                        "Include:\n"
+                        "1. Asset selection and reasoning\n"
+                        "2. Entry strategy with specific levels\n"
+                        "3. Stop loss placement\n"
+                        "4. Take profit targets\n"
+                        "5. Risk:reward ratio\n"
+                        "6. Key market conditions supporting this trade\n"
+                        "7. Compatibility with user's profile"
+                    )
+                    
+                    # Adjust prompt for verbosity
+                    prompt = adjust_for_verbosity(base_prompt, verbosity)
+                    
                     try:
-                        suggestion = await rei_call(
-                            "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
-                            f"{profile_context}\n\n"
-                            "Include:\n"
-                            "1. Asset selection and reasoning\n"
-                            "2. Entry strategy with specific levels\n"
-                            "3. Stop loss placement\n"
-                            "4. Take profit targets\n"
-                            "5. Risk:reward ratio\n"
-                            "6. Key market conditions supporting this trade\n"
-                            "7. Compatibility with user's profile"
-                        )
+                        suggestion = await rei_call(prompt)
                     except Exception as primary_e:
                         logger.warning(f"Primary API call failed for suggestion: {str(primary_e)}")
                         # Use a simple fallback
@@ -924,258 +1219,6 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception as nested_e:
             logger.error(f"Failed to send error message: {str(nested_e)}")
-
-async def handle_market_analysis(query, asset, profile_context, profile):
-    """Handle market analysis request with reliable fallbacks."""
-    user_id = query.from_user.id
-    try:
-        await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
-        logger.debug("Preparing market analysis prompt")
-        prompt = (
-            f"Provide a comprehensive market analysis for {asset}, considering the user's profile."
-            f"{profile_context}\n\n"
-            f"Include:\n"
-            f"1. Technical Analysis\n"
-            f"   - Trend analysis (focus on {profile.get('timeframe', 'all')} timeframe)\n"
-            f"   - Support/resistance levels\n"
-            f"   - Chart patterns and formations\n"
-            f"   - Key technical indicators\n\n"
-            f"2. Market Structure\n"
-            f"   - Current market phase\n"
-            f"   - Recent price action\n"
-            f"   - Volume profile\n"
-            f"   - Market dominance\n\n"
-            f"3. Fundamental Analysis\n"
-            f"   - Recent news/developments\n"
-            f"   - Network metrics (if applicable)\n"
-            f"   - Funding rates (important for user's preference)\n"
-            f"   - Market sentiment\n\n"
-            f"4. Risk Assessment\n"
-            f"   - Volatility analysis\n"
-            f"   - Liquidity conditions\n"
-            f"   - Potential risks/catalysts\n"
-            f"   - Correlation with market\n"
-            f"   - Suitability for user's risk profile"
-        )
-        
-        logger.debug("Calling REI API for market analysis")
-        start_time = datetime.now()
-        logger.debug(f"Starting REI API call at {start_time}")
-        
-        # Try primary API first
-        try:
-            response = await rei_call(prompt)
-            logger.info("Primary API call succeeded")
-        except Exception as primary_e:
-            logger.warning(f"Primary API call failed: {str(primary_e)}")
-            
-            # Try alternative API
-            try:
-                logger.info("Trying alternative API endpoint")
-                shorter_prompt = (
-                    f"Provide a concise market analysis for {asset} with these key points:\n"
-                    f"- Current trend and price action\n"
-                    f"- Key support/resistance levels\n"
-                    f"- Technical indicators and patterns\n"
-                    f"- Market sentiment and outlook\n"
-                    f"- Risk assessment and recommendation"
-                )
-                response = await rei_call_alternative(shorter_prompt)
-                logger.info("Alternative API call succeeded")
-            except Exception as alt_e:
-                logger.error(f"Alternative API also failed: {str(alt_e)}")
-                # Fall back to static response
-                response = get_fallback_response(asset, "market")
-                logger.info("Using static fallback response")
-        
-        end_time = datetime.now()
-        duration = (end_time - start_time).total_seconds()
-        logger.info(f"Total processing time: {duration} seconds")
-        
-        # Split response into chunks if too long
-        if len(response) > 4096:
-            logger.debug("Response too long, splitting into chunks")
-            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
-            for i, chunk in enumerate(chunks):
-                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
-                try:
-                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
-                except Exception as chunk_e:
-                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
-                    # If markdown fails, try sending without parsing
-                    await query.message.reply_text(chunk)
-        else:
-            logger.debug("Sending single response message")
-            try:
-                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
-            except Exception as send_e:
-                logger.error(f"Error sending response with markdown: {str(send_e)}")
-                # If markdown fails, try sending without parsing
-                await query.message.reply_text(response)
-                
-    except Exception as e:
-        logger.error(f"Complete failure in market analysis: {str(e)}", exc_info=True)
-        # Last resort fallback
-        await query.message.reply_text(
-            get_fallback_response(asset, "market"),
-            reply_markup=MAIN_MENU
-        )
-    finally:
-        # Always release the user's processing state
-        await set_user_processing(user_id, False)
-
-async def handle_trade_setup(query, asset, profile_context, profile):
-    """Handle trade setup request with reliable fallbacks."""
-    user_id = query.from_user.id
-    try:
-        await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
-        logger.debug("Preparing trade setup prompt")
-        prompt = (
-            f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
-            f"{profile_context}\n\n"
-            f"Include:\n"
-            f"1. Current Market Context\n"
-            f"   - Price action summary\n"
-            f"   - Key levels in play\n"
-            f"   - Market structure\n\n"
-            f"2. Trade Setup Details\n"
-            f"   - Entry zone/price with reasoning\n"
-            f"   - Stop loss placement and rationale\n"
-            f"   - Take profit targets (multiple levels)\n"
-            f"   - Position sizing based on user's capital and risk\n\n"
-            f"3. Risk Management\n"
-            f"   - Risk:reward ratio\n"
-            f"   - Maximum risk per trade (based on user's preference)\n"
-            f"   - Key invalidation points\n\n"
-            f"4. Important Considerations\n"
-            f"   - Potential catalysts\n"
-            f"   - Key risks to watch\n"
-            f"   - Timeframe alignment with user's preference\n"
-            f"   - Funding rate implications"
-        )
-        
-        logger.debug("Calling REI API for trade setup")
-        start_time = datetime.now()
-        logger.debug(f"Starting REI API call at {start_time}")
-        
-        # Try primary API first
-        try:
-            response = await rei_call(prompt)
-            logger.info("Primary API call succeeded")
-        except Exception as primary_e:
-            logger.warning(f"Primary API call failed: {str(primary_e)}")
-            
-            # Try alternative API
-            try:
-                logger.info("Trying alternative API endpoint")
-                shorter_prompt = (
-                    f"Provide a concise trade setup for {asset} with these key points:\n"
-                    f"- Current market context and price action\n"
-                    f"- Entry zone/price with reasoning\n"
-                    f"- Stop loss placement and rationale\n"
-                    f"- Take profit targets\n"
-                    f"- Risk management considerations"
-                )
-                response = await rei_call_alternative(shorter_prompt)
-                logger.info("Alternative API call succeeded")
-            except Exception as alt_e:
-                logger.error(f"Alternative API also failed: {str(alt_e)}")
-                # Fall back to static response
-                response = get_fallback_response(asset, "setup")
-                logger.info("Using static fallback response")
-        
-        end_time = datetime.now()
-        duration = (end_time - start_time).total_seconds()
-        logger.info(f"Total processing time: {duration} seconds")
-        
-        # Split response into chunks if too long
-        if len(response) > 4096:
-            logger.debug("Response too long, splitting into chunks")
-            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
-            for i, chunk in enumerate(chunks):
-                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
-                try:
-                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
-                except Exception as chunk_e:
-                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
-                    # If markdown fails, try sending without parsing
-                    await query.message.reply_text(chunk)
-        else:
-            logger.debug("Sending single response message")
-            try:
-                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
-            except Exception as send_e:
-                logger.error(f"Error sending response with markdown: {str(send_e)}")
-                # If markdown fails, try sending without parsing
-                await query.message.reply_text(response)
-                
-    except Exception as e:
-        logger.error(f"Complete failure in trade setup: {str(e)}", exc_info=True)
-        # Last resort fallback
-        await query.message.reply_text(
-            get_fallback_response(asset, "setup"),
-            reply_markup=MAIN_MENU
-        )
-    finally:
-        # Always release the user's processing state
-        await set_user_processing(user_id, False)
-
-async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle custom asset input from user."""
-    asset = update.message.text.strip().upper()
-    logger.info(f"Received custom asset input: {asset}")
-    
-    if not asset:
-        await update.message.reply_text("Please enter a valid asset symbol.")
-        return
-        
-    # Format the asset with -PERP suffix if not already present
-    if not asset.endswith("-PERP"):
-        asset = f"{asset}-PERP"
-    
-    # Create analysis options buttons
-    buttons = [
-        [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{asset}")],
-        [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{asset}")]
-    ]
-    markup = InlineKeyboardMarkup(buttons)
-    
-    await update.message.reply_text(
-        f"Choose analysis type for {asset}:",
-        reply_markup=markup
-    )
-
-async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to check database contents"""
-    try:
-        if not db_pool:
-            await update.message.reply_text("❌ Database not connected")
-            return
-            
-        async with db_pool.acquire() as conn:
-            # Get total number of profiles
-            count = await conn.fetchval('SELECT COUNT(*) FROM profile')
-            
-            # Get last 5 profiles
-            rows = await conn.fetch('''
-                SELECT uid, data->>'experience' as exp, 
-                       data->>'capital' as cap,
-                       data->>'timeframe' as tf
-                FROM profile 
-                ORDER BY uid DESC 
-                LIMIT 5
-            ''')
-            
-            # Format message
-            msg = f"📊 Database Status:\n\nTotal Profiles: {count}\n\nLast 5 profiles:"
-            for row in rows:
-                msg += f"\n• User {row['uid']}: {row['exp']}, {row['cap']}, {row['tf']}"
-            
-            await update.message.reply_text(msg)
-            
-    except Exception as e:
-        logger.error(f"Error checking database: {str(e)}")
-        await update.message.reply_text("❌ Error checking database")
 
 def init_handlers(application: Application) -> None:
     """Initialize all handlers for the application."""
