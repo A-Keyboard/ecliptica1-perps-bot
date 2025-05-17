@@ -298,12 +298,12 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             elif value.endswith("-PERP"):
                 logger.debug(f"Processing {value} analysis options")
                 buttons = [
-                    [InlineKeyboardButton("Trade Setup", callback_data=f"analysis:setup:{value}")],
-                    [InlineKeyboardButton("Analysis", callback_data=f"analysis:market:{value}")]
+                    [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{value}")],
+                    [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{value}")]
                 ]
                 markup = InlineKeyboardMarkup(buttons)
                 await query.message.edit_text(
-                    f"What would you like to know about {value}?",
+                    f"Choose analysis type for {value}:",
                     reply_markup=markup
                 )
                 
@@ -311,12 +311,26 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             analysis_type, asset = value.split(":", 1)
             logger.debug(f"Processing {analysis_type} request for {asset}")
             
-            await query.message.reply_text(f"Analyzing {asset}...")
-            
             if analysis_type == "setup":
-                response = await rei_call(f"Provide a detailed trade setup for {asset}")
+                await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
+                response = await rei_call(
+                    f"Provide a detailed trade setup for {asset} including:\n"
+                    f"1. Entry zone/price\n"
+                    f"2. Stop loss level\n"
+                    f"3. Take profit targets\n"
+                    f"4. Risk:reward ratio\n"
+                    f"5. Key levels to watch"
+                )
             else:  # market analysis
-                response = await rei_call(f"Provide technical analysis for {asset}")
+                await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
+                response = await rei_call(
+                    f"Provide comprehensive market analysis for {asset} including:\n"
+                    f"1. Technical analysis (trend, S/R levels, patterns)\n"
+                    f"2. Market structure\n"
+                    f"3. Key fundamental factors\n"
+                    f"4. Volume analysis\n"
+                    f"5. Overall market sentiment"
+                )
                 
             await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
             
@@ -352,13 +366,13 @@ async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     
     # Create analysis options buttons
     buttons = [
-        [InlineKeyboardButton("Trade Setup", callback_data=f"analysis:setup:{asset}")],
-        [InlineKeyboardButton("Analysis", callback_data=f"analysis:market:{asset}")]
+        [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{asset}")],
+        [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{asset}")]
     ]
     markup = InlineKeyboardMarkup(buttons)
     
     await update.message.reply_text(
-        f"What would you like to know about {asset}?",
+        f"Choose analysis type for {asset}:",
         reply_markup=markup
     )
 
