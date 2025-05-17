@@ -684,31 +684,8 @@ async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error checking database: {str(e)}")
         await update.message.reply_text("❌ Error checking database")
 
-# ───────────────────────────── main ─────────────────────────────────────── #
-async def main() -> None:
-    """Start the bot."""
-    logger.info("Starting bot")
-    
-    # Initialize environment and database
-    init_env()
-    await init_db()
-    init_assets()
-    
-    # Initialize bot
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(MessageHandler(filters.Regex('^▶️ Start$'), main_menu))
-    application.add_handler(CommandHandler('trade', trade_start))
-    application.add_handler(MessageHandler(filters.Regex('^📊 Trade$'), trade_start))
-    application.add_handler(CommandHandler('ask', ask_cmd))
-    application.add_handler(MessageHandler(filters.Regex('^🤖 Ask AI$'), ask_cmd))
-    application.add_handler(CommandHandler('faq', faq_cmd))
-    application.add_handler(MessageHandler(filters.Regex('^❓ FAQ$'), faq_cmd))
-    application.add_handler(CommandHandler('help', help_cmd))
-    application.add_handler(CommandHandler('checkdb', check_db_cmd))
-    
+def init_handlers(application: Application) -> None:
+    """Initialize all handlers for the application."""
     # Setup conversation handler
     setup_conv = ConversationHandler(
         entry_points=[
@@ -720,21 +697,57 @@ async def main() -> None:
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
+    
+    # Add all handlers
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(MessageHandler(filters.Regex('^▶️ Start$'), main_menu))
     application.add_handler(setup_conv)
-    
-    # Add callback handler for trade and analysis actions
+    application.add_handler(CommandHandler('trade', trade_start))
+    application.add_handler(MessageHandler(filters.Regex('^📊 Trade$'), trade_start))
+    application.add_handler(CommandHandler('ask', ask_cmd))
+    application.add_handler(MessageHandler(filters.Regex('^🤖 Ask AI$'), ask_cmd))
+    application.add_handler(CommandHandler('faq', faq_cmd))
+    application.add_handler(MessageHandler(filters.Regex('^❓ FAQ$'), faq_cmd))
+    application.add_handler(CommandHandler('help', help_cmd))
+    application.add_handler(CommandHandler('checkdb', check_db_cmd))
     application.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
-    
-    # Add handler for custom asset input
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
+
+async def post_init(application: Application) -> None:
+    """Post-initialization tasks."""
+    await init_db()
+    init_assets()
+
+async def post_stop(application: Application) -> None:
+    """Cleanup tasks."""
+    if db_pool:
+        await db_pool.close()
+
+def main() -> None:
+    """Start the bot."""
+    # Initialize environment first
+    init_env()
     
-    # Error handler
+    # Create application
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .post_stop(post_stop)
+        .build()
+    )
+    
+    # Add handlers
+    init_handlers(application)
+    
+    # Add error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Exception while handling an update: {context.error}")
     application.add_error_handler(error_handler)
     
+    # Run application
     logger.info("Starting bot...")
-    await application.run_polling()
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
