@@ -589,6 +589,64 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                         )
                         return
                         
+                elif analysis_type == "setup":
+                    await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
+                    try:
+                        logger.debug("Preparing trade setup prompt")
+                        response = await rei_call(
+                            f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
+                            f"{profile_context}\n\n"
+                            f"Include:\n"
+                            f"1. Current Market Context\n"
+                            f"   - Price action summary\n"
+                            f"   - Key levels in play\n"
+                            f"   - Market structure\n\n"
+                            f"2. Trade Setup Details\n"
+                            f"   - Entry zone/price with reasoning\n"
+                            f"   - Stop loss placement and rationale\n"
+                            f"   - Take profit targets (multiple levels)\n"
+                            f"   - Position sizing based on user's capital and risk\n\n"
+                            f"3. Risk Management\n"
+                            f"   - Risk:reward ratio\n"
+                            f"   - Maximum risk per trade (based on user's preference)\n"
+                            f"   - Key invalidation points\n\n"
+                            f"4. Important Considerations\n"
+                            f"   - Potential catalysts\n"
+                            f"   - Key risks to watch\n"
+                            f"   - Timeframe alignment with user's preference\n"
+                            f"   - Funding rate implications"
+                        )
+                        logger.info(f"Successfully received trade setup response of length: {len(response)}")
+                        
+                        # Split response into chunks if too long
+                        if len(response) > 4096:
+                            logger.debug("Response too long, splitting into chunks")
+                            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
+                            for i, chunk in enumerate(chunks):
+                                logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
+                                try:
+                                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+                                except Exception as chunk_e:
+                                    logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
+                                    # If markdown fails, try sending without parsing
+                                    await query.message.reply_text(chunk)
+                        else:
+                            logger.debug("Sending single response message")
+                            try:
+                                await query.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+                            except Exception as send_e:
+                                logger.error(f"Error sending response with markdown: {str(send_e)}")
+                                # If markdown fails, try sending without parsing
+                                await query.message.reply_text(response)
+                                
+                    except Exception as e:
+                        logger.error(f"Error generating trade setup: {str(e)}", exc_info=True)
+                        await query.message.reply_text(
+                            "Sorry, I couldn't generate a trade setup at the moment. Please try again later.",
+                            reply_markup=MAIN_MENU
+                        )
+                        return
+                
             except ValueError as e:
                 logger.error(f"Invalid analysis value format: {value}, error: {str(e)}")
                 await query.message.reply_text(
@@ -600,6 +658,47 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 await query.message.reply_text(
                     "An unexpected error occurred. Please try again later.",
                     reply_markup=MAIN_MENU
+                )
+        
+        elif action == "trade":
+            if value == "SUGGEST":
+                logger.debug("Processing suggestion request")
+                await query.message.reply_text("🧠 Analyzing market conditions...")
+                try:
+                    suggestion = await rei_call(
+                        "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
+                        f"{profile_context}\n\n"
+                        "Include:\n"
+                        "1. Asset selection and reasoning\n"
+                        "2. Entry strategy with specific levels\n"
+                        "3. Stop loss placement\n"
+                        "4. Take profit targets\n"
+                        "5. Risk:reward ratio\n"
+                        "6. Key market conditions supporting this trade\n"
+                        "7. Compatibility with user's profile"
+                    )
+                    await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+                except Exception as e:
+                    logger.error(f"Error getting trade suggestion: {str(e)}")
+                    await query.message.reply_text(
+                        "Sorry, I couldn't generate a trade suggestion at the moment. Please try again later.",
+                        reply_markup=MAIN_MENU
+                    )
+                
+            elif value == "CUSTOM":
+                logger.debug("Processing custom asset request")
+                await query.message.edit_text("Enter asset symbol (e.g. BTC):")
+                
+            elif value.endswith("-PERP"):
+                logger.debug(f"Processing {value} analysis options")
+                buttons = [
+                    [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{value}")],
+                    [InlineKeyboardButton("📈 Market Analysis (Tech/Fund)", callback_data=f"analysis:market:{value}")]
+                ]
+                markup = InlineKeyboardMarkup(buttons)
+                await query.message.edit_text(
+                    f"Choose analysis type for {value}:",
+                    reply_markup=markup
                 )
             
         else:
