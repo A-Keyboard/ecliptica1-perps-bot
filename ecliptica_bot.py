@@ -149,6 +149,21 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("/setup | /trade | /ask | /cancel | /faq")
+
+async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Quick Perps 101 primer."""
+    await update.message.reply_text(
+        textwrap.dedent(
+            """
+*Perps 101*
+• Funding: paid every 8h between longs & shorts.
+• Mark price: fair reference to avoid wicks.
+• Keep a healthy margin buffer!"""
+        ),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
     await update.message.reply_text("/setup | /trade | /ask | /cancel")
 
 # Setup flow
