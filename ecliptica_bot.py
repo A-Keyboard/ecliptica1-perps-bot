@@ -577,7 +577,20 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                             f"   - Suitability for user's risk profile"
                         )
                         logger.debug("Calling REI API for market analysis")
-                        response = await rei_call(prompt)
+                        start_time = datetime.now()
+                        logger.debug(f"Starting REI API call at {start_time}")
+                        
+                        try:
+                            response = await rei_call(prompt)
+                        except Exception as api_e:
+                            end_time = datetime.now()
+                            duration = (end_time - start_time).total_seconds()
+                            logger.error(f"REI API call failed after {duration} seconds with error: {str(api_e)}")
+                            raise api_e
+                            
+                        end_time = datetime.now()
+                        duration = (end_time - start_time).total_seconds()
+                        logger.info(f"REI API call completed successfully in {duration} seconds")
                         logger.info(f"Successfully received market analysis response of length: {len(response)}")
                         
                         # Split response into chunks if too long
@@ -613,29 +626,42 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
                     try:
                         logger.debug("Preparing trade setup prompt")
-                        response = await rei_call(
-                            f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
-                            f"{profile_context}\n\n"
-                            f"Include:\n"
-                            f"1. Current Market Context\n"
-                            f"   - Price action summary\n"
-                            f"   - Key levels in play\n"
-                            f"   - Market structure\n\n"
-                            f"2. Trade Setup Details\n"
-                            f"   - Entry zone/price with reasoning\n"
-                            f"   - Stop loss placement and rationale\n"
-                            f"   - Take profit targets (multiple levels)\n"
-                            f"   - Position sizing based on user's capital and risk\n\n"
-                            f"3. Risk Management\n"
-                            f"   - Risk:reward ratio\n"
-                            f"   - Maximum risk per trade (based on user's preference)\n"
-                            f"   - Key invalidation points\n\n"
-                            f"4. Important Considerations\n"
-                            f"   - Potential catalysts\n"
-                            f"   - Key risks to watch\n"
-                            f"   - Timeframe alignment with user's preference\n"
-                            f"   - Funding rate implications"
-                        )
+                        start_time = datetime.now()
+                        logger.debug(f"Starting REI API call at {start_time}")
+                        
+                        try:
+                            response = await rei_call(
+                                f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
+                                f"{profile_context}\n\n"
+                                f"Include:\n"
+                                f"1. Current Market Context\n"
+                                f"   - Price action summary\n"
+                                f"   - Key levels in play\n"
+                                f"   - Market structure\n\n"
+                                f"2. Trade Setup Details\n"
+                                f"   - Entry zone/price with reasoning\n"
+                                f"   - Stop loss placement and rationale\n"
+                                f"   - Take profit targets (multiple levels)\n"
+                                f"   - Position sizing based on user's capital and risk\n\n"
+                                f"3. Risk Management\n"
+                                f"   - Risk:reward ratio\n"
+                                f"   - Maximum risk per trade (based on user's preference)\n"
+                                f"   - Key invalidation points\n\n"
+                                f"4. Important Considerations\n"
+                                f"   - Potential catalysts\n"
+                                f"   - Key risks to watch\n"
+                                f"   - Timeframe alignment with user's preference\n"
+                                f"   - Funding rate implications"
+                            )
+                        except Exception as api_e:
+                            end_time = datetime.now()
+                            duration = (end_time - start_time).total_seconds()
+                            logger.error(f"REI API call failed after {duration} seconds with error: {str(api_e)}")
+                            raise api_e
+                            
+                        end_time = datetime.now()
+                        duration = (end_time - start_time).total_seconds()
+                        logger.info(f"REI API call completed successfully in {duration} seconds")
                         logger.info(f"Successfully received trade setup response of length: {len(response)}")
                         
                         # Split response into chunks if too long
@@ -685,19 +711,54 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.debug("Processing suggestion request")
                 await query.message.reply_text("🧠 Analyzing market conditions...")
                 try:
-                    suggestion = await rei_call(
-                        "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
-                        f"{profile_context}\n\n"
-                        "Include:\n"
-                        "1. Asset selection and reasoning\n"
-                        "2. Entry strategy with specific levels\n"
-                        "3. Stop loss placement\n"
-                        "4. Take profit targets\n"
-                        "5. Risk:reward ratio\n"
-                        "6. Key market conditions supporting this trade\n"
-                        "7. Compatibility with user's profile"
-                    )
-                    await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+                    start_time = datetime.now()
+                    logger.debug(f"Starting trade suggestion REI API call at {start_time}")
+                    
+                    try:
+                        suggestion = await rei_call(
+                            "Based on current market conditions and the user's profile, suggest a high-probability trade setup."
+                            f"{profile_context}\n\n"
+                            "Include:\n"
+                            "1. Asset selection and reasoning\n"
+                            "2. Entry strategy with specific levels\n"
+                            "3. Stop loss placement\n"
+                            "4. Take profit targets\n"
+                            "5. Risk:reward ratio\n"
+                            "6. Key market conditions supporting this trade\n"
+                            "7. Compatibility with user's profile"
+                        )
+                    except Exception as api_e:
+                        end_time = datetime.now()
+                        duration = (end_time - start_time).total_seconds()
+                        logger.error(f"Trade suggestion REI API call failed after {duration} seconds with error: {str(api_e)}")
+                        raise api_e
+                        
+                    end_time = datetime.now()
+                    duration = (end_time - start_time).total_seconds()
+                    logger.info(f"Trade suggestion REI API call completed successfully in {duration} seconds")
+                    logger.info(f"Successfully received trade suggestion of length: {len(suggestion)}")
+                    
+                    # Split response into chunks if too long
+                    if len(suggestion) > 4096:
+                        logger.debug("Suggestion too long, splitting into chunks")
+                        chunks = [suggestion[i:i+4096] for i in range(0, len(suggestion), 4096)]
+                        for i, chunk in enumerate(chunks):
+                            logger.debug(f"Sending chunk {i+1}/{len(chunks)} of length {len(chunk)}")
+                            try:
+                                await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+                            except Exception as chunk_e:
+                                logger.error(f"Error sending chunk {i+1}: {str(chunk_e)}")
+                                # If markdown fails, try sending without parsing
+                                await query.message.reply_text(chunk)
+                    else:
+                        logger.debug("Sending single suggestion message")
+                        try:
+                            await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+                        except Exception as send_e:
+                            logger.error(f"Error sending suggestion with markdown: {str(send_e)}")
+                            # If markdown fails, try sending without parsing
+                            await query.message.reply_text(suggestion)
+                            
                 except Exception as e:
                     logger.error(f"Error getting trade suggestion: {str(e)}")
                     await query.message.reply_text(
