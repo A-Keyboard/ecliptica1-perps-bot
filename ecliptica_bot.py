@@ -700,9 +700,8 @@ async def main() -> None:
         
         logger.info("All handlers registered")
 
-        # Start polling with proper shutdown handling
-        await app.initialize()
-        await app.start()
+        # Start polling
+        logger.info("Starting polling")
         await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
     except Exception as e:
@@ -710,8 +709,6 @@ async def main() -> None:
         raise
     finally:
         logger.info("Shutting down...")
-        if 'app' in locals():
-            await app.shutdown()
         if db_pool:
             await db_pool.close()
 
@@ -747,32 +744,10 @@ async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error checking database: {str(e)}")
         await update.message.reply_text("❌ Error checking database")
 
-def run_bot():
-    """Entry point for the bot."""
+if __name__ == '__main__':
     try:
-        # Get the current event loop or create a new one
-        try:
-            loop = asyncio.get_running_loop()
-            logger.info("Using existing event loop")
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            logger.info("Created new event loop")
-
-        # Run the main function
-        loop.run_until_complete(main())
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot stopped due to error: {str(e)}", exc_info=True)
-    finally:
-        try:
-            loop = asyncio.get_event_loop()
-            tasks = asyncio.all_tasks(loop)
-            for task in tasks:
-                task.cancel()
-            loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-            loop.close()
-        except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}", exc_info=True)
-
-if __name__ == '__main__':
-    run_bot()
