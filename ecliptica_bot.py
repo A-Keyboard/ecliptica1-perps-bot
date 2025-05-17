@@ -143,9 +143,10 @@ async def ask_next(update_or_query, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     i = ctx.user_data["i"]
     if i >= len(QUESTS):
         data = json.dumps(ctx.user_data["ans"])
+        uid = update_or_query.effective_chat.id if hasattr(update_or_query, 'effective_chat') else update_or_query.message.chat.id
         with sqlite3.connect(DB) as con:
-            con.execute("REPLACE INTO profile VALUES (?,?)", (update_or_query.effective_user.id, data))
-        await update_or_query.message.reply_text("✅ Profile saved.", reply_markup=MAIN_MENU)
+            con.execute("REPLACE INTO profile VALUES (?,?)", (uid, data))
+        await update_or_query.message.reply_text("✅ Profile saved!", reply_markup=MAIN_MENU)
         return ConversationHandler.END
 
     key, question = QUESTS[i]
@@ -177,6 +178,15 @@ async def handle_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         ctx.user_data["i"] += 1
         
         await query.answer(f"Selected: {value}")
+        
+        # Check if this was the last question
+        if ctx.user_data["i"] >= len(QUESTS):
+            data = json.dumps(ctx.user_data["ans"])
+            with sqlite3.connect(DB) as con:
+                con.execute("REPLACE INTO profile VALUES (?,?)", (query.from_user.id, data))
+            await query.message.reply_text("✅ Profile saved!", reply_markup=MAIN_MENU)
+            return ConversationHandler.END
+            
         return await ask_next(query, ctx)
         
     except Exception as e:
