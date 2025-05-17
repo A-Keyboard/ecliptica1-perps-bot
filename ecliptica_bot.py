@@ -9,7 +9,7 @@ v0.6.18
 """
 from __future__ import annotations
 import os, json, sqlite3, logging, textwrap, asyncio, requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Final, List, Dict
 from dotenv import load_dotenv
 from telegram import (
@@ -30,6 +30,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+import aiohttp
 
 # ───────────────────────────── configuration ────────────────────────────────── #
 DB: Final[str] = "ecliptica.db"
@@ -40,6 +41,7 @@ token_lock = asyncio.Lock()
 
 # Conversation states
 SETUP, TRADE_SELECT, TRADE_ASSET, TRADE_DIRECTION = range(4)
+TRADE_SUGGEST, TRADE_CUSTOM = range(5, 7)  # New conversation states
 
 # Setup questions + options
 QUESTS: Final[List[tuple[str, str]]] = [
@@ -60,6 +62,9 @@ OPTIONS: Final[Dict[str, List[str]]] = {
     "leverage":   ["1x", "3x", "5x", "10x"],
     "funding":    ["yes", "unsure", "prefer spot"],
 }
+
+# Add new constants
+TOP_ASSETS_COUNT = 5  # Number of top volume assets to show
 
 # ───────────────────────────── environment ─────────────────────────────────── #
 def init_env() -> None:
@@ -206,12 +211,90 @@ async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     ans = await rei_call(prompt)
     await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
 
+# Add function to fetch top volume assets
+async def fetch_top_volume_assets() -> List[str]:
+    """Fetch top volume perpetual trading pairs from a reliable API"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Using Binance API as an example - you can change to your preferred data source
+            async with session.get('https://fapi.binance.com/fapi/v1/ticker/24hr') as resp:
+                data = await resp.json()
+                # Sort by volume and get top pairs
+                sorted_pairs = sorted(data, key=lambda x: float(x['volume']), reverse=True)
+                return [f"{p['symbol']}-PERP" for p in sorted_pairs[:TOP_ASSETS_COUNT]]
+    except Exception as e:
+        logging.error(f"Error fetching top assets: {e}")
+        return ASSETS[:TOP_ASSETS_COUNT]  # Fallback to default assets
+
 async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    top_assets = await fetch_top_volume_assets()
+    
+    # Create keyboard with top volume assets and additional options
+    buttons = [
+        [InlineKeyboardButton(f"📈 {asset} (Top Volume)", callback_data=f"trade:asset:{asset}")]
+        for asset in top_assets
+    ]
+    buttons.extend([
+        [InlineKeyboardButton("🎯 Get Trade Suggestion", callback_data="trade:suggest")],
+        [InlineKeyboardButton("🔍 Custom Asset", callback_data="trade:custom")]
+    ])
+    
+    markup = InlineKeyboardMarkup(buttons)
     await update.message.reply_text(
-        "Select asset or type symbol, or ask suggestion:",
-        reply_markup=ReplyKeyboardRemove()
+        "Choose from top volume assets or get a suggestion:",
+        reply_markup=markup
     )
     return TRADE_ASSET
+
+async def handle_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    action = query.data.split(":")[1]
+    
+    if action == "suggest":
+        # Get user profile for personalized suggestion
+        with sqlite3.connect(DB) as con:
+            data = con.execute("SELECT data FROM profile WHERE uid=?", 
+                             (query.from_user.id,)).fetchone()
+        
+        if not data:
+            await query.message.reply_text(
+                "Please /setup your profile first for personalized suggestions."
+            )
+            return ConversationHandler.END
+            
+        profile = json.loads(data[0])
+        prompt = f"""Given user profile:
+        - Experience: {profile.get('experience')}
+        - Risk: {profile.get('risk')}
+        - Timeframe: {profile.get('timeframe')}
+        - Leverage: {profile.get('leverage')}
+        
+        Suggest one high-probability trade setup with:
+        1. Asset selection with reason
+        2. Entry zones
+        3. Stop loss
+        4. Take profit
+        5. Key levels to watch
+        """
+        
+        await query.message.reply_text("🧠 Analyzing market conditions...")
+        suggestion = await rei_call(prompt)
+        await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+        return ConversationHandler.END
+        
+    elif action == "custom":
+        await query.message.reply_text(
+            "Enter asset symbol (e.g. BTC-PERP, ETH-PERP):"
+        )
+        return TRADE_CUSTOM
+        
+    elif action == "asset":
+        asset = query.data.split(":")[2]
+        # Handle selected asset...
+        await query.message.reply_text(f"Selected {asset}. What would you like to know?")
+        return TRADE_SELECT
 
 # ───────────────────────────── main ─────────────────────────────────────── #
 def main() -> None:
@@ -251,6 +334,26 @@ def main() -> None:
 
     # Add a general callback query handler for debugging
     app.add_handler(CallbackQueryHandler(handle_setup))
+
+    # Add to conversation handler states
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[
+                MessageHandler(filters.Regex(r'^📊 Trade$'), trade_start),
+                CommandHandler('trade', trade_start)
+            ],
+            states={
+                TRADE_ASSET: [
+                    CallbackQueryHandler(handle_trade, pattern=r'^trade:'),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, trade_start)
+                ],
+                TRADE_CUSTOM: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_trade)
+                ]
+            },
+            fallbacks=[CommandHandler('cancel', cancel)]
+        )
+    )
 
     app.run_polling()
 
