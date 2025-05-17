@@ -1,17 +1,16 @@
-# ecliptica_bot.py — v0.6.17
+# ecliptica_bot.py — v0.6.18
 """
-Ecliptica Perps Assistant — Telegram trading bot with guided /trade flow, suggestions, and formatted AI responses
+Ecliptica Perps Assistant — Telegram trading bot with guided /trade flow, interactive setup via buttons, suggestions, and formatted AI responses
 
-v0.6.17
+v0.6.18
 ──────
-• Added initial ▶️ Start button flow
-• Init 🛠 and Trade 📊 commands now exposed via buttons
-• Bumped REI call timeout to 300s
+• Restored interactive buttons for setup questions
+• Added InlineKeyboardMarkup in ask_next/handle_setup
 """
 from __future__ import annotations
 import os, json, sqlite3, logging, textwrap, asyncio, requests
 from datetime import datetime, timezone
-from typing import Final, List
+from typing import Final, List, Dict
 from dotenv import load_dotenv
 from telegram import (
     Update,
@@ -42,16 +41,25 @@ token_lock = asyncio.Lock()
 # Conversation states
 SETUP, TRADE_SELECT, TRADE_ASSET, TRADE_DIRECTION = range(4)
 
-# Setup questions
-QUESTS: Final[list[tuple[str, str]]] = [
-    ("experience", "Your perps experience? (0-3m / 3-12m / >12m)"),
+# Setup questions + options
+QUESTS: Final[List[tuple[str, str]]] = [
+    ("experience", "Your perps experience?"),
     ("capital",    "Capital allocated (USD)"),
     ("risk",       "Max loss % (e.g. 2)"),
-    ("quote",      "Quote currency (USDT / USD-C / BTC)"),
-    ("timeframe",  "Timeframe (scalp / intraday / swing / position)"),
-    ("leverage",   "Leverage multiple (1 if none)"),
-    ("funding",    "Comfort paying funding 8h? (yes / unsure / prefer spot)"),
+    ("quote",      "Quote currency"),
+    ("timeframe",  "Timeframe"),
+    ("leverage",   "Leverage multiple"),
+    ("funding",    "Comfort paying funding 8h?"),
 ]
+OPTIONS: Final[Dict[str, List[str]]] = {
+    "experience": ["0-3m", "3-12m", ">12m"],
+    "capital":    ["1k", "5k", "10k+"],
+    "risk":       ["1%", "2%", "5%"],
+    "quote":      ["USDT", "USD-C", "BTC"],
+    "timeframe":  ["scalp", "intraday", "swing", "position"],
+    "leverage":   ["1x", "3x", "5x", "10x"],
+    "funding":    ["yes", "unsure", "prefer spot"],
+}
 
 # ───────────────────────────── environment ─────────────────────────────────── #
 def init_env() -> None:
@@ -100,14 +108,12 @@ MAIN_MENU = ReplyKeyboardMarkup(
 )
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Initial /start callback: only shows ▶️ Start button."""
     await update.message.reply_text(
         "👋 Welcome! Press ▶️ Start to begin.",
         reply_markup=INIT_MENU
     )
 
 async def main_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Shows main menu after user presses ▶️ Start."""
     await update.message.reply_text(
         "👋 Welcome! Choose an option below:",
         reply_markup=MAIN_MENU
@@ -124,43 +130,50 @@ async def faq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         • Mark price: fair reference.
         • Keep a healthy margin buffer!"""), parse_mode=ParseMode.MARKDOWN)
 
-# ---------- setup wizard ---------- #
+# ─── Setup wizard with buttons ───────────────────────────────────────────── #
 async def setup_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data.clear(); ctx.user_data["i"]=0; ctx.user_data["ans"]={}
-    await update.message.reply_text("Let's set up your profile — /cancel anytime.")
-    return await ask_next(update,ctx)
+    await update.message.reply_text(
+        "Let's set up your profile — /cancel anytime.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return await ask_next(update, ctx)
 
-async def ask_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def ask_next(update_or_query, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     i = ctx.user_data["i"]
-    if i>=len(QUESTS):
+    if i >= len(QUESTS):
         data = json.dumps(ctx.user_data["ans"])
         with sqlite3.connect(DB) as con:
-            con.execute("REPLACE INTO profile VALUES (?,?)",
-                        (update.effective_user.id,data))
-        await update.message.reply_text("✅ Profile saved.", reply_markup=MAIN_MENU)
+            con.execute("REPLACE INTO profile VALUES (?,?)", (update_or_query.effective_user.id, data))
+        await update_or_query.message.reply_text("✅ Profile saved.", reply_markup=MAIN_MENU)
         return ConversationHandler.END
-    key,q=QUESTS[i]
-    await update.message.reply_text(f"[{i+1}/{len(QUESTS)}] {q}")
+
+    key, question = QUESTS[i]
+    buttons = [[InlineKeyboardButton(opt, callback_data=f"setup:{key}:{opt}")]
+               for opt in OPTIONS[key]]
+    markup = InlineKeyboardMarkup(buttons)
+    await update_or_query.message.reply_text(f"[{i+1}/{len(QUESTS)}] {question}", reply_markup=markup)
     return SETUP
 
-async def collect(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    i = ctx.user_data["i"]
-    ctx.user_data["ans"][QUESTS[i][0]] = update.message.text.strip()
+async def handle_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    data = update.callback_query.data.split(":")
+    _, key, value = data
+    ctx.user_data["ans"][key] = value
     ctx.user_data["i"] += 1
-    return await ask_next(update,ctx)
+    await update.callback_query.answer()
+    return await ask_next(update, ctx)
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Setup cancelled.", reply_markup=MAIN_MENU)
     return ConversationHandler.END
 
-# ---------- ask AI ---------- #
+# ─── Ask AI / Trade flows omitted ─────────────────────────────────────────── #
 async def ask_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = update.message.text.replace("/ask","",1).strip() or "Give me a market outlook."
     await update.message.reply_text("🧠 Analyzing market trends…")
     ans = await rei_call(prompt)
     await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
 
-# ---------- trade flow start ---------- #
 async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "Select asset or type symbol, or ask suggestion:",
@@ -168,38 +181,39 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     )
     return TRADE_ASSET
 
-# trade asset / direction logic omitted for brevity
-
 # ───────────────────────────── main ─────────────────────────────────────── #
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     init_env(); init_db(); init_assets()
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(False).build()
-    # Start flow
+
+    # Start & main menu
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.Regex(r'^▶️ Start$'), main_menu))
-    # Main menu
+
+    # Main menu buttons
     app.add_handler(MessageHandler(filters.Regex(r'^🔧 Setup Profile$'), setup_start))
-    app.add_handler(CommandHandler('setup', setup_start))
     app.add_handler(MessageHandler(filters.Regex(r'^📊 Trade$'), trade_start))
-    app.add_handler(CommandHandler('trade', trade_start))
     app.add_handler(MessageHandler(filters.Regex(r'^🤖 Ask AI$'), ask_cmd))
-    app.add_handler(CommandHandler('ask', ask_cmd))
     app.add_handler(MessageHandler(filters.Regex(r'^❓ FAQ$'), faq_cmd))
+    app.add_handler(CommandHandler('setup', setup_start))
+    app.add_handler(CommandHandler('trade', trade_start))
+    app.add_handler(CommandHandler('ask', ask_cmd))
     app.add_handler(CommandHandler('faq', faq_cmd))
     app.add_handler(CommandHandler('help', help_cmd))
-    # Setup wizard conversation
+
+    # Setup conversation
     app.add_handler(
         ConversationHandler(
-            entry_points=[
-                CommandHandler('setup', setup_start),
-                MessageHandler(filters.Regex(r'^🔧 Setup Profile$'), setup_start)
-            ],
-            states={ SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)] },
+            entry_points=[MessageHandler(filters.Regex(r'^🔧 Setup Profile$'), setup_start),
+                          CommandHandler('setup', setup_start)],
+            states={ SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')] },
             fallbacks=[CommandHandler('cancel', cancel)]
         )
     )
+
     app.run_polling()
 
 if __name__=='__main__':
     main()
+
