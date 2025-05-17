@@ -293,7 +293,7 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 
             elif value == "CUSTOM":
                 logger.debug("Processing custom asset request")
-                await query.message.reply_text("Enter asset symbol (e.g. BTC):")
+                await query.message.edit_text("Enter asset symbol (e.g. BTC):")
                 
             elif value.endswith("-PERP"):
                 logger.debug(f"Processing {value} analysis options")
@@ -337,6 +337,31 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as nested_e:
             logger.error(f"Failed to send error message: {str(nested_e)}")
 
+async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle custom asset input from user."""
+    asset = update.message.text.strip().upper()
+    logger.info(f"Received custom asset input: {asset}")
+    
+    if not asset:
+        await update.message.reply_text("Please enter a valid asset symbol.")
+        return
+        
+    # Format the asset with -PERP suffix if not already present
+    if not asset.endswith("-PERP"):
+        asset = f"{asset}-PERP"
+    
+    # Create analysis options buttons
+    buttons = [
+        [InlineKeyboardButton("Trade Setup", callback_data=f"analysis:setup:{asset}")],
+        [InlineKeyboardButton("Analysis", callback_data=f"analysis:market:{asset}")]
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+    
+    await update.message.reply_text(
+        f"What would you like to know about {asset}?",
+        reply_markup=markup
+    )
+
 # ───────────────────────────── main ─────────────────────────────────────── #
 def main() -> None:
     """Start the bot."""
@@ -377,6 +402,9 @@ def main() -> None:
         
         # Add general callback handler for trade and analysis actions
         app.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
+        
+        # Add handler for custom asset input
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
         
         logger.info("All handlers registered")
 
