@@ -315,7 +315,16 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.debug("Processing suggestion request")
                 await query.message.reply_text("🧠 Analyzing market conditions...")
                 try:
-                    suggestion = await rei_call("Suggest a high-probability trade setup")
+                    suggestion = await rei_call(
+                        "Based on current market conditions, suggest a high-probability trade setup.\n\n"
+                        "Include:\n"
+                        "1. Asset selection and reasoning\n"
+                        "2. Entry strategy with specific levels\n"
+                        "3. Stop loss placement\n"
+                        "4. Take profit targets\n"
+                        "5. Risk:reward ratio\n"
+                        "6. Key market conditions supporting this trade"
+                    )
                     await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
                 except Exception as e:
                     logger.error(f"Error getting trade suggestion: {str(e)}")
@@ -349,12 +358,25 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
                     try:
                         response = await rei_call(
-                            f"Provide a detailed trade setup for {asset} including:\n"
-                            f"1. Entry zone/price\n"
-                            f"2. Stop loss level\n"
-                            f"3. Take profit targets\n"
-                            f"4. Risk:reward ratio\n"
-                            f"5. Key levels to watch"
+                            f"Provide a detailed trade setup analysis for {asset}.\n\n"
+                            f"Include:\n"
+                            f"1. Current Market Context\n"
+                            f"   - Price action summary\n"
+                            f"   - Key levels in play\n"
+                            f"   - Market structure\n\n"
+                            f"2. Trade Setup Details\n"
+                            f"   - Entry zone/price with reasoning\n"
+                            f"   - Stop loss placement and rationale\n"
+                            f"   - Take profit targets (multiple levels)\n"
+                            f"   - Position sizing suggestion\n\n"
+                            f"3. Risk Management\n"
+                            f"   - Risk:reward ratio\n"
+                            f"   - Maximum risk per trade\n"
+                            f"   - Key invalidation points\n\n"
+                            f"4. Important Considerations\n"
+                            f"   - Potential catalysts\n"
+                            f"   - Key risks to watch\n"
+                            f"   - Timeframe for the setup"
                         )
                     except Exception as e:
                         logger.error(f"Error generating trade setup: {str(e)}")
@@ -368,12 +390,28 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
                     try:
                         response = await rei_call(
-                            f"Provide comprehensive market analysis for {asset} including:\n"
-                            f"1. Technical analysis (trend, S/R levels, patterns)\n"
-                            f"2. Market structure\n"
-                            f"3. Key fundamental factors\n"
-                            f"4. Volume analysis\n"
-                            f"5. Overall market sentiment"
+                            f"Provide a comprehensive market analysis for {asset}.\n\n"
+                            f"Include:\n"
+                            f"1. Technical Analysis\n"
+                            f"   - Trend analysis (multiple timeframes)\n"
+                            f"   - Support/resistance levels\n"
+                            f"   - Chart patterns and formations\n"
+                            f"   - Key technical indicators\n\n"
+                            f"2. Market Structure\n"
+                            f"   - Current market phase\n"
+                            f"   - Recent price action\n"
+                            f"   - Volume profile\n"
+                            f"   - Market dominance\n\n"
+                            f"3. Fundamental Analysis\n"
+                            f"   - Recent news/developments\n"
+                            f"   - Network metrics (if applicable)\n"
+                            f"   - Funding rates\n"
+                            f"   - Market sentiment\n\n"
+                            f"4. Risk Assessment\n"
+                            f"   - Volatility analysis\n"
+                            f"   - Liquidity conditions\n"
+                            f"   - Potential risks/catalysts\n"
+                            f"   - Correlation with market"
                         )
                     except Exception as e:
                         logger.error(f"Error generating market analysis: {str(e)}")
