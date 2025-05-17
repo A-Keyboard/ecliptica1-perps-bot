@@ -35,6 +35,13 @@ from telegram.ext import (
 import aiohttp
 import asyncpg
 
+# Set up logging first
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # ───────────────────────────── configuration ────────────────────────────────── #
 ASSETS: List[str] = []
 
@@ -75,25 +82,52 @@ def init_env() -> None:
     load_dotenv()
     global BOT_TOKEN, REI_KEY
     BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    REI_KEY   = os.environ.get("REICORE_API_KEY",     "").strip()
+    REI_KEY = os.environ.get("REICORE_API_KEY", "").strip()
+    
+    # Log environment status (without exposing sensitive data)
+    logger.info("Environment initialization:")
+    logger.info(f"BOT_TOKEN present: {bool(BOT_TOKEN)}")
+    logger.info(f"REI_KEY present: {bool(REI_KEY)}")
+    
+    if not BOT_TOKEN:
+        raise Exception("TELEGRAM_BOT_TOKEN not set")
+    if not REI_KEY:
+        raise Exception("REICORE_API_KEY not set")
 
 # ───────────────────────────── database ────────────────────────────────────── #
 async def init_db() -> None:
     """Initialize PostgreSQL database connection pool"""
     global db_pool
     try:
-        # Get database URL from Railway
-        database_url = os.environ.get('POSTGRES_URL')
+        # Try different possible URL environment variables
+        database_url = (
+            os.environ.get('POSTGRES_URL') or 
+            os.environ.get('DATABASE_URL') or
+            os.environ.get('POSTGRESQL_URL')
+        )
         logger.info("Attempting database connection...")
         
         if not database_url:
-            logger.error("POSTGRES_URL environment variable not set!")
-            raise Exception("POSTGRES_URL not set")
+            logger.error("No database URL found in environment variables!")
+            logger.error("Available environment variables: " + ", ".join(os.environ.keys()))
+            raise Exception("Database URL not set")
             
         # Create connection pool
         logger.info("Creating database pool...")
-        db_pool = await asyncpg.create_pool(database_url)
-        logger.info("Database pool created successfully")
+        try:
+            db_pool = await asyncpg.create_pool(database_url)
+            logger.info("Database pool created successfully")
+        except Exception as e:
+            logger.error(f"Failed to create pool with error: {str(e)}")
+            # Try with ssl mode disable if first attempt failed
+            if 'ssl' not in database_url.lower():
+                logger.info("Retrying with sslmode=disable...")
+                if '?' in database_url:
+                    database_url += '&sslmode=disable'
+                else:
+                    database_url += '?sslmode=disable'
+                db_pool = await asyncpg.create_pool(database_url)
+                logger.info("Database pool created successfully with sslmode=disable")
         
         # Create tables if they don't exist
         async with db_pool.acquire() as conn:
@@ -217,10 +251,20 @@ MAIN_MENU = ReplyKeyboardMarkup(
 )
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "👋 Welcome! Press ▶️ Start to begin.",
-        reply_markup=INIT_MENU
-    )
+    """Start command handler with error logging"""
+    try:
+        logger.info(f"Start command received from user {update.effective_user.id}")
+        await update.message.reply_text(
+            "👋 Welcome! Press ▶️ Start to begin.",
+            reply_markup=INIT_MENU
+        )
+        logger.info("Start message sent successfully")
+    except Exception as e:
+        logger.error(f"Error in start command: {str(e)}", exc_info=True)
+        try:
+            await update.message.reply_text("Sorry, there was an error. Please try again.")
+        except:
+            logger.error("Could not send error message to user")
 
 async def main_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
@@ -332,13 +376,6 @@ async def fetch_top_volume_assets() -> List[str]:
     except Exception as e:
         logging.error(f"Error fetching top assets: {e}")
         return ASSETS[:TOP_ASSETS_COUNT]  # Fallback to default assets
-
-# Set up logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the trade flow."""
