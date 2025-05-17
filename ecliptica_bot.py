@@ -652,62 +652,6 @@ async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         reply_markup=markup
     )
 
-# ───────────────────────────── main ─────────────────────────────────────── #
-async def main() -> None:
-    """Start the bot."""
-    logger.info("Starting bot")
-    
-    # Initialize environment and database
-    init_env()
-    await init_db()  # Now async
-    init_assets()
-    
-    # Initialize bot
-    app = Application.builder().token(BOT_TOKEN).build()
-    logger.info("Bot application built")
-
-    # Add conversation handler for setup
-    setup_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler('setup', setup_start),
-            MessageHandler(filters.Regex('^🔧 Setup Profile$'), setup_start)
-        ],
-        states={
-            SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-        name="setup_conversation"
-    )
-    
-    # Add handlers in specific order
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(MessageHandler(filters.Regex('^▶️ Start$'), main_menu))
-    app.add_handler(setup_handler)  # Add setup conversation handler
-    app.add_handler(CommandHandler('trade', trade_start))
-    app.add_handler(MessageHandler(filters.Regex('^📊 Trade$'), trade_start))
-    app.add_handler(CommandHandler('ask', ask_cmd))
-    app.add_handler(MessageHandler(filters.Regex('^🤖 Ask AI$'), ask_cmd))
-    app.add_handler(CommandHandler('faq', faq_cmd))
-    app.add_handler(MessageHandler(filters.Regex('^❓ FAQ$'), faq_cmd))
-    app.add_handler(CommandHandler('help', help_cmd))
-    app.add_handler(CommandHandler('checkdb', check_db_cmd))
-    
-    # Add general callback handler for trade and analysis actions
-    app.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
-    
-    # Add handler for custom asset input
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
-    
-    logger.info("All handlers registered")
-    
-    # Add error handler
-    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        logger.error("Exception while handling an update:", exc_info=context.error)
-        
-    app.add_error_handler(error_handler)
-    
-    return app
-
 async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to check database contents"""
     try:
@@ -740,24 +684,87 @@ async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error checking database: {str(e)}")
         await update.message.reply_text("❌ Error checking database")
 
-if __name__ == '__main__':
-    try:
-        # Create application
-        app = asyncio.run(main())
+# ───────────────────────────── main ─────────────────────────────────────── #
+async def main() -> None:
+    """Start the bot."""
+    logger.info("Starting bot")
+    
+    # Initialize environment and database
+    init_env()
+    await init_db()  # Now async
+    init_assets()
+    
+    # Initialize bot
+    app = Application.builder().token(BOT_TOKEN).build()
+    logger.info("Bot application built")
+
+    # Add conversation handler for setup
+    setup_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler('setup', setup_start),
+            MessageHandler(filters.Regex('^🔧 Setup Profile$'), setup_start)
+        ],
+        states={
+            SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+        name="setup_conversation",
+        persistent=False
+    )
+    
+    # Add handlers in specific order
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(MessageHandler(filters.Regex('^▶️ Start$'), main_menu))
+    app.add_handler(setup_handler)  # Add setup conversation handler
+    app.add_handler(CommandHandler('trade', trade_start))
+    app.add_handler(MessageHandler(filters.Regex('^📊 Trade$'), trade_start))
+    app.add_handler(CommandHandler('ask', ask_cmd))
+    app.add_handler(MessageHandler(filters.Regex('^🤖 Ask AI$'), ask_cmd))
+    app.add_handler(CommandHandler('faq', faq_cmd))
+    app.add_handler(MessageHandler(filters.Regex('^❓ FAQ$'), faq_cmd))
+    app.add_handler(CommandHandler('help', help_cmd))
+    app.add_handler(CommandHandler('checkdb', check_db_cmd))
+    
+    # Add general callback handler for trade and analysis actions
+    app.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
+    
+    # Add handler for custom asset input
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
+    
+    logger.info("All handlers registered")
+    
+    # Add error handler
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.error("Exception while handling an update:", exc_info=context.error)
         
-        # Run application with built-in runner
-        app.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            stop_signals=[],  # Disable signal handling as Railway manages this
-            close_loop=False  # Let Railway manage the event loop
-        )
+    app.add_error_handler(error_handler)
+    
+    # Start the bot
+    try:
+        logger.info("Starting polling")
+        await app.initialize()
+        await app.start()
+        await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.error(f"Error during polling: {str(e)}", exc_info=True)
+        raise
+    finally:
+        logger.info("Stopping application...")
+        try:
+            if db_pool:
+                await db_pool.close()
+            await app.stop()
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}", exc_info=True)
+
+def run_bot():
+    """Run the bot with proper error handling."""
+    try:
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot stopped due to error: {str(e)}", exc_info=True)
-    finally:
-        if 'app' in locals():
-            try:
-                app.stop()
-            except Exception as e:
-                logger.error(f"Error stopping application: {str(e)}", exc_info=True)
+
+if __name__ == '__main__':
+    run_bot()
