@@ -579,53 +579,47 @@ async def verify_promo_code(code: str) -> bool:
     """Verify if a promo code is valid."""
     return code.upper() in PROMO_CODES
 
-# ───────────────────────────── rei request ────────────────────────────────── #
-async def rei_call(prompt: str) -> str:
+# Add cache to store responses
+RESPONSE_CACHE = {}  # Format: {asset: {"response": str, "timestamp": datetime, "type": "market|setup"}}
+MAX_CACHE_AGE = 3600  # Cache responses for 1 hour
+
+async def rei_call(prompt: str, asset_name: str = None, analysis_type: str = None) -> str:
     """Make an async call to REI API with better error handling, retry logic, and chunking for long prompts."""
     logger.info(f"Making REI API call with prompt length: {len(prompt)}")
     print(f"STDOUT: Making REI API call with prompt length: {len(prompt)}", file=sys.stdout)
     print(f"STDERR: Making REI API call with prompt length: {len(prompt)}", file=sys.stderr)
     
+    # Check cache first if asset_name is provided
+    if asset_name and analysis_type:
+        cache_key = f"{asset_name}:{analysis_type}"
+        if cache_key in RESPONSE_CACHE:
+            cache_entry = RESPONSE_CACHE[cache_key]
+            cache_age = (datetime.now() - cache_entry["timestamp"]).total_seconds()
+            
+            # Use cached response if it's fresh enough
+            if cache_age < MAX_CACHE_AGE:
+                logger.info(f"Using cached response for {cache_key}, age: {cache_age:.1f} seconds")
+                return cache_entry["response"]
+            else:
+                logger.info(f"Cached response for {cache_key} expired ({cache_age:.1f} seconds old)")
+    
     # Start watchdog timer
     start_watchdog()
     
     try:
-        # Check if prompt is very long
-        if len(prompt) > 2000:
-            logger.info("Long prompt detected, splitting request into context and questions")
-            
-            # Split the prompt into context and questions
-            parts = prompt.split("Include:")
-            if len(parts) == 2:
-                context = parts[0].strip()
-                questions = "Include:" + parts[1].strip()
-                
-                logger.info(f"Splitting prompt: context length {len(context)}, questions length {len(questions)}")
-                
-                # Make the first call with just the context to prime the model
-                logger.info("Making initial context call")
-                try:
-                    context_response = await _rei_call_internal(
-                        f"{context}\n\nPlease confirm you understand this context and are ready for questions.",
-                        max_tokens=100
-                    )
-                    logger.info(f"Context call successful: {context_response[:50]}...")
-                except Exception as e:
-                    logger.error(f"Context call failed: {str(e)}")
-                    # Continue anyway to the main call
-                
-                # Now make the main call with reference to the context
-                logger.info("Making main call with questions")
-                result = await _rei_call_internal(
-                    f"Using the context I provided earlier about {context[:50]}...\n\n{questions}", 
-                    max_tokens=4000
-                )
-                # Stop watchdog timer as we're done
-                stop_watchdog()
-                return result
-            
         # For shorter prompts, just make a regular call
         result = await _rei_call_internal(prompt)
+        
+        # Cache the result if asset_name is provided
+        if asset_name and analysis_type:
+            cache_key = f"{asset_name}:{analysis_type}"
+            RESPONSE_CACHE[cache_key] = {
+                "response": result,
+                "timestamp": datetime.now(),
+                "type": analysis_type
+            }
+            logger.info(f"Cached response for {cache_key}")
+        
         # Stop watchdog timer as we're done
         stop_watchdog()
         return result
@@ -633,7 +627,32 @@ async def rei_call(prompt: str) -> str:
         # Make sure to stop the watchdog if we hit an exception
         stop_watchdog()
         logger.error(f"rei_call failed with exception: {str(e)}", exc_info=True)
-        raise
+        
+        # Try alternative API if available
+        try:
+            logger.info("Primary API failed, trying alternative API")
+            result = await rei_call_alternative(prompt)
+            
+            # Cache the alternative result too
+            if asset_name and analysis_type:
+                cache_key = f"{asset_name}:{analysis_type}"
+                RESPONSE_CACHE[cache_key] = {
+                    "response": result,
+                    "timestamp": datetime.now(),
+                    "type": analysis_type
+                }
+                logger.info(f"Cached alternative response for {cache_key}")
+                
+            return result
+        except Exception as alt_e:
+            logger.error(f"Alternative API also failed: {str(alt_e)}")
+            
+            # Use fallback if both APIs fail
+            if asset_name:
+                fallback = get_fallback_response(asset_name, analysis_type or "")
+                logger.info(f"Using fallback response for {asset_name}")
+                return fallback
+            raise
 
 async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
     """Internal implementation of the REI API call with retries."""
@@ -651,7 +670,7 @@ async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
     logger.debug(f"Request body: {json.dumps(body, indent=2)}")
     
     # Retry parameters
-    max_retries = 2
+    max_retries = 1  # Reduced from 2 to make fallback happen faster
     retry_count = 0
     last_error = None
     
@@ -660,35 +679,20 @@ async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
             # Reset watchdog timer for this attempt
             start_watchdog()
             
-            # Use a timeout of 90 seconds to stay under Cloudflare's ~100 second limit
+            # Use a timeout of 30 seconds to avoid long waits
             logger.info(f"REI API call attempt {retry_count + 1}/{max_retries + 1}")
             print(f"STDOUT: REI API call attempt {retry_count + 1}/{max_retries + 1}", file=sys.stdout)
             print(f"STDERR: REI API call attempt {retry_count + 1}/{max_retries + 1}", file=sys.stderr)
             
             async with aiohttp.ClientSession() as session:
-                # Create a task for the post request to be able to add a shield
-                post_task = asyncio.create_task(
-                    session.post(
-                        "https://api.reisearch.box/v1/chat/completions",
-                        headers=headers,
-                        json=body,
-                        timeout=90  # Reduced to 90 seconds to avoid Cloudflare timeout
-                    )
+                # Use shorter 30 seconds timeout
+                resp = await session.post(
+                    "https://api.reisearch.box/v1/chat/completions",
+                    headers=headers,
+                    json=body,
+                    timeout=30  # Reduced to 30 seconds to fail faster and try fallback
                 )
                 
-                # Use shield to ensure task continues running even if waiting coroutine is cancelled
-                shielded_task = asyncio.shield(post_task)
-                
-                try:
-                    # Wait for the response with timeout
-                    resp = await asyncio.wait_for(shielded_task, timeout=95)
-                except asyncio.TimeoutError:
-                    # Cancel the task if it times out
-                    if not post_task.done():
-                        post_task.cancel()
-                    raise
-                
-                # Process the response
                 if resp.status != 200:
                     error_text = await resp.text()
                     logger.error(f"REI API error: Status {resp.status}, Response: {error_text}")
@@ -740,42 +744,19 @@ async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
             last_error = e
             retry_count += 1
             if retry_count <= max_retries:
-                logger.info(f"Retrying in 5 seconds...")
-                await asyncio.sleep(5)  # Wait before retrying
+                logger.info(f"Retrying in 3 seconds...")
+                await asyncio.sleep(3)  # Shorter wait before retrying
             continue
-        except aiohttp.ClientError as e:
-            # Reset the watchdog timer
-            stop_watchdog()
-            logger.error(f"Network error calling REI API: {str(e)}")
-            print(f"STDERR: Network error calling REI API: {str(e)}", file=sys.stderr)
-            raise Exception(f"Network error: {str(e)}")
-        except json.JSONDecodeError as e:
-            # Reset the watchdog timer
-            stop_watchdog()
-            logger.error(f"Invalid JSON response from REI API: {str(e)}")
-            print(f"STDERR: Invalid JSON response from REI API: {str(e)}", file=sys.stderr)
-            raise
         except Exception as e:
             # Reset the watchdog timer
             stop_watchdog()
-            # Check if it's a Cloudflare timeout error
-            if "524" in str(e):
-                logger.warning(f"Cloudflare timeout detected on attempt {retry_count + 1}")
-                print(f"STDERR: Cloudflare timeout detected on attempt {retry_count + 1}", file=sys.stderr)
-                last_error = e
-                retry_count += 1
-                if retry_count <= max_retries:
-                    logger.info(f"Retrying with a shorter prompt in 5 seconds...")
-                    # If it's a retry for a Cloudflare timeout, simplify the prompt
-                    if retry_count > 0 and len(prompt) > 500:
-                        prompt = prompt[:500] + "...\n\nPlease provide a concise response due to previous timeout issues."
-                        body["messages"][0]["content"] = prompt
-                        body["max_tokens"] = min(max_tokens, 1000)  # Reduce token count for faster response
-                    await asyncio.sleep(5)
-                continue
-            logger.error(f"Unexpected error in rei_call: {str(e)}", exc_info=True)
-            print(f"STDERR: Unexpected error in rei_call: {str(e)}", file=sys.stderr)
-            raise
+            logger.error(f"Error in _rei_call_internal: {str(e)}")
+            last_error = e
+            retry_count += 1
+            if retry_count <= max_retries:
+                logger.info(f"Retrying in 3 seconds...")
+                await asyncio.sleep(3)
+            continue
     
     # If we get here, all retries failed
     logger.error(f"All {max_retries + 1} attempts failed. Last error: {str(last_error)}")
@@ -784,28 +765,32 @@ async def _rei_call_internal(prompt: str, max_tokens: int = 2000) -> str:
 
 # Add an alternative REI API call function that uses a different endpoint
 async def rei_call_alternative(prompt: str) -> str:
-    """Make an API call to a more reliable REI API endpoint as fallback."""
-    logger.info(f"Making alternative REI API call with prompt length: {len(prompt)}")
+    """Make an API call to a more reliable API endpoint as fallback."""
+    logger.info(f"Making alternative API call with prompt length: {len(prompt)}")
     print(f"STDOUT: Trying alternative API endpoint with prompt length: {len(prompt)}", file=sys.stdout)
     
-    headers = {"Authorization": f"Bearer {REI_KEY}", "Content-Type": "application/json"}
+    # Use a more reliable API that doesn't rely on custom REI endpoint
+    # Use OpenAI-compatible endpoint with default key
+    api_key = REI_KEY  # Reuse the same key for simplicity
+    
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     
     # Use a simpler model with lower timeout
     body = {
-        "model": "gpt-3.5-turbo",  # Use a simpler model as fallback
+        "model": "gpt-3.5-turbo",  # Use a standard, stable model
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 1000,
-        "temperature": 0.7
+        "temperature": 0.3
     }
     
     try:
         # Use a short timeout to avoid waiting too long
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "https://api.openai.com/v1/chat/completions",  # OpenAI-compatible endpoint
+                "https://api.openai.com/v1/chat/completions",  # Standard OpenAI API endpoint
                 headers=headers,
                 json=body,
-                timeout=60  # Shorter timeout
+                timeout=30  # Short timeout
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -825,6 +810,45 @@ async def rei_call_alternative(prompt: str) -> str:
         logger.error(f"Alternative API call failed: {str(e)}")
         # If even this fails, use the fallback response
         raise
+
+# Add a fallback response function
+def get_fallback_response(asset: str = "", analysis_type: str = "") -> str:
+    """Generate a detailed fallback response when the API fails."""
+    if not asset:
+        return ("I'm currently experiencing issues connecting to my analysis service. "
+                "Please try again in a few minutes. If the issue persists, consider using a simpler request.")
+    
+    if analysis_type == "market":
+        asset_name = asset.replace("-PERP", "")
+        return (f"I'm sorry, I couldn't retrieve a full market analysis for {asset} at the moment due to technical issues. "
+                f"Some key points about {asset} to consider:\n\n"
+                f"• Check the current price and 24h change on your preferred exchange\n"
+                f"• Look at the daily timeframe for major support/resistance levels\n"
+                f"• Monitor funding rates if taking a leveraged position\n"
+                f"• Consider overall market sentiment and correlation with BTC\n\n"
+                f"For {asset_name} specifically:\n"
+                f"• The daily chart can provide insights into the broader trend\n"
+                f"• Recent market volatility may create opportunities for scalping\n"
+                f"• Watch for key technical levels that may act as support/resistance\n"
+                f"• Consider correlation with overall market conditions\n\n"
+                f"Please try again later for a more detailed analysis.")
+    elif analysis_type == "setup":
+        asset_name = asset.replace("-PERP", "")
+        return (f"I'm sorry, I couldn't generate a complete trade setup for {asset} at this time due to technical issues. "
+                f"For a basic approach to trading {asset}:\n\n"
+                f"• Look for key support/resistance levels on the 4h and daily charts\n"
+                f"• Consider setting stops 2-5% below your entry (based on your risk profile)\n"
+                f"• Target profit taking at previous resistance levels\n"
+                f"• Always manage your position size based on your risk tolerance\n\n"
+                f"For {asset_name} specifically:\n"
+                f"• Consider monitoring volume for confirmation of trend\n"
+                f"• Look for confluence between multiple timeframes\n"
+                f"• Set a clear risk-to-reward ratio based on your trading plan\n"
+                f"• Always have a clear exit strategy before entering a trade\n\n"
+                f"Please try again later for a more detailed trade setup.")
+    else:
+        return (f"I'm having trouble connecting to my analysis service to provide information about {asset}. "
+                f"Please try again in a few minutes, or try a different request.")
 
 # ───────────────────────────── telegram callbacks ────────────────────────── #
 INIT_MENU = ReplyKeyboardMarkup(
@@ -1626,33 +1650,15 @@ async def handle_market_analysis(query, asset, profile_context, profile):
         start_time = datetime.now()
         logger.debug(f"Starting REI API call at {start_time}")
         
-        # Try primary API first
+        # Call REI API with asset name and analysis type for caching
         try:
-            response = await rei_call(prompt)
-            logger.info("Primary API call succeeded")
-        except Exception as primary_e:
-            logger.warning(f"Primary API call failed: {str(primary_e)}")
-            
-            # Try alternative API
-            try:
-                logger.info("Trying alternative API endpoint")
-                # For brevity, simplify the prompt even more
-                shorter_prompt_base = (
-                    f"Provide a market analysis for {asset} with these key points:\n"
-                    f"- Current trend and price action\n"
-                    f"- Key support/resistance levels\n"
-                    f"- Technical indicators and patterns\n"
-                    f"- Market sentiment and outlook\n"
-                    f"- Risk assessment and recommendation"
-                )
-                shorter_prompt = adjust_for_verbosity(shorter_prompt_base, verbosity)
-                response = await rei_call_alternative(shorter_prompt)
-                logger.info("Alternative API call succeeded")
-            except Exception as alt_e:
-                logger.error(f"Alternative API also failed: {str(alt_e)}")
-                # Fall back to static response
-                response = get_fallback_response(asset, "market")
-                logger.info("Using static fallback response")
+            response = await rei_call(prompt, asset, "market")
+            logger.info("Market analysis API call succeeded")
+        except Exception as e:
+            logger.error(f"All API attempts failed: {str(e)}")
+            # Fallback is now handled within rei_call
+            response = get_fallback_response(asset, "market")
+            logger.info("Using default fallback response")
         
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
@@ -1695,6 +1701,28 @@ async def handle_trade_setup(query, asset, profile_context, profile):
     """Handle trade setup request with reliable fallbacks."""
     user_id = query.from_user.id
     try:
+        # Check subscription access (similar to market analysis)
+        has_access, message = await check_subscription_access(user_id)
+        
+        if not has_access:
+            buttons = [[InlineKeyboardButton("Subscribe Now", callback_data="sub:show")]]
+            markup = InlineKeyboardMarkup(buttons)
+            
+            await query.message.reply_text(
+                f"⚠️ {message}",
+                reply_markup=markup
+            )
+            return
+            
+        # Increment usage if needed
+        subscription = await get_user_subscription(user_id)
+        if not subscription or not subscription['is_active']:
+            count = await increment_usage_count(user_id)
+            logger.info(f"User {user_id} analysis count incremented to {count}")
+            
+            if message:
+                await query.message.reply_text(f"ℹ️ {message}")
+            
         # Show waiting state with specific message for this setup
         await show_waiting_state(query, f"🎯 Generating trade setup for {asset}... (this may take a minute)")
         
@@ -1735,33 +1763,15 @@ async def handle_trade_setup(query, asset, profile_context, profile):
         start_time = datetime.now()
         logger.debug(f"Starting REI API call at {start_time}")
         
-        # Try primary API first
+        # Call REI API with asset name and analysis type for caching
         try:
-            response = await rei_call(prompt)
-            logger.info("Primary API call succeeded")
-        except Exception as primary_e:
-            logger.warning(f"Primary API call failed: {str(primary_e)}")
-            
-            # Try alternative API
-            try:
-                logger.info("Trying alternative API endpoint")
-                # For brevity, simplify the prompt even more
-                shorter_prompt_base = (
-                    f"Provide a trade setup for {asset} with these key points:\n"
-                    f"- Current market context and price action\n"
-                    f"- Entry zone/price with reasoning\n"
-                    f"- Stop loss placement and rationale\n"
-                    f"- Take profit targets\n"
-                    f"- Risk management considerations"
-                )
-                shorter_prompt = adjust_for_verbosity(shorter_prompt_base, verbosity)
-                response = await rei_call_alternative(shorter_prompt)
-                logger.info("Alternative API call succeeded")
-            except Exception as alt_e:
-                logger.error(f"Alternative API also failed: {str(alt_e)}")
-                # Fall back to static response
-                response = get_fallback_response(asset, "setup")
-                logger.info("Using static fallback response")
+            response = await rei_call(prompt, asset, "setup")
+            logger.info("Trade setup API call succeeded")
+        except Exception as e:
+            logger.error(f"All API attempts failed: {str(e)}")
+            # Fallback is now handled within rei_call
+            response = get_fallback_response(asset, "setup")
+            logger.info("Using default fallback response")
         
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
@@ -1879,33 +1889,6 @@ async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"Error checking database: {str(e)}")
         await update.message.reply_text("❌ Error checking database")
-
-# Add a fallback response function
-def get_fallback_response(asset: str = "", analysis_type: str = "") -> str:
-    """Generate a simple fallback response when the REI API fails."""
-    if not asset:
-        return ("I'm currently experiencing issues connecting to my analysis service. "
-                "Please try again in a few minutes. If the issue persists, consider using a simpler request.")
-    
-    if analysis_type == "market":
-        return (f"I'm sorry, I couldn't retrieve a full market analysis for {asset} at the moment due to technical issues. "
-                f"Some key points about {asset} to consider:\n\n"
-                f"• Check the current price and 24h change on your preferred exchange\n"
-                f"• Look at the daily timeframe for major support/resistance levels\n"
-                f"• Monitor funding rates if taking a leveraged position\n"
-                f"• Consider overall market sentiment and correlation with BTC\n\n"
-                f"Please try again later for a more detailed analysis.")
-    elif analysis_type == "setup":
-        return (f"I'm sorry, I couldn't generate a complete trade setup for {asset} at this time due to technical issues. "
-                f"For a basic approach to trading {asset}:\n\n"
-                f"• Look for key support/resistance levels on the 4h and daily charts\n"
-                f"• Consider setting stops 2-5% below your entry (based on your risk profile)\n"
-                f"• Target profit taking at previous resistance levels\n"
-                f"• Always manage your position size based on your risk tolerance\n\n"
-                f"Please try again later for a more detailed trade setup.")
-    else:
-        return (f"I'm having trouble connecting to my analysis service to provide information about {asset}. "
-                f"Please try again in a few minutes, or try a different request.")
 
 def init_handlers(application: Application) -> None:
     """Initialize all handlers for the application."""
