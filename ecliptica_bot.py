@@ -19,6 +19,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardRemove,
+    Message,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -42,6 +43,7 @@ token_lock = asyncio.Lock()
 # Conversation states
 SETUP, TRADE_SELECT, TRADE_ASSET, TRADE_DIRECTION = range(4)
 TRADE_SUGGEST, TRADE_CUSTOM = range(5, 7)  # New conversation states
+TRADE_SETUP, TRADE_ANALYSIS = range(7, 9)
 
 # Setup questions + options
 QUESTS: Final[List[tuple[str, str]]] = [
@@ -248,53 +250,133 @@ async def trade_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def handle_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    if not query:
+        # Handle direct text input for custom asset
+        asset = update.message.text.strip().upper()
+        if not asset.endswith('-PERP'):
+            asset = f"{asset}-PERP"
+        ctx.user_data['asset'] = asset
+        return await provide_trade_options(update.message, ctx)
+        
     await query.answer()
     
-    action = query.data.split(":")[1]
-    
-    if action == "suggest":
-        # Get user profile for personalized suggestion
-        with sqlite3.connect(DB) as con:
-            data = con.execute("SELECT data FROM profile WHERE uid=?", 
-                             (query.from_user.id,)).fetchone()
-        
-        if not data:
-            await query.message.reply_text(
-                "Please /setup your profile first for personalized suggestions."
-            )
-            return ConversationHandler.END
-            
-        profile = json.loads(data[0])
-        prompt = f"""Given user profile:
-        - Experience: {profile.get('experience')}
-        - Risk: {profile.get('risk')}
-        - Timeframe: {profile.get('timeframe')}
-        - Leverage: {profile.get('leverage')}
-        
-        Suggest one high-probability trade setup with:
-        1. Asset selection with reason
-        2. Entry zones
-        3. Stop loss
-        4. Take profit
-        5. Key levels to watch
-        """
-        
-        await query.message.reply_text("🧠 Analyzing market conditions...")
-        suggestion = await rei_call(prompt)
-        await query.message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+    if ":" not in query.data:
+        await query.message.reply_text("Invalid selection. Please try again.")
         return ConversationHandler.END
         
+    parts = query.data.split(":")
+    action = parts[1]
+    
+    if action == "suggest":
+        return await provide_trade_suggestion(query.message, ctx)
     elif action == "custom":
         await query.message.reply_text(
-            "Enter asset symbol (e.g. BTC-PERP, ETH-PERP):"
+            "Enter asset symbol (e.g. BTC, ETH):\nI'll add -PERP automatically."
         )
         return TRADE_CUSTOM
-        
     elif action == "asset":
-        asset = query.data.split(":")[2]
-        # Handle selected asset...
-        await query.message.reply_text(f"Selected {asset}. What would you like to know?")
-        return TRADE_SELECT
+        ctx.user_data['asset'] = parts[2]
+        return await provide_trade_options(query.message, ctx)
+    elif action == "setup":
+        return await generate_trade_setup(query.message, ctx)
+    elif action == "analysis":
+        return await provide_market_analysis(query.message, ctx)
+
+async def provide_trade_options(message: Message, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    asset = ctx.user_data.get('asset')
+    buttons = [
+        [InlineKeyboardButton("📊 Get Trade Setup", callback_data=f"trade:setup")],
+        [InlineKeyboardButton("📈 Market Analysis", callback_data=f"trade:analysis")],
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+    await message.reply_text(
+        f"What would you like to know about {asset}?",
+        reply_markup=markup
+    )
+    return TRADE_SETUP
+
+async def generate_trade_setup(message: Message, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    asset = ctx.user_data.get('asset')
+    
+    # Get user profile for personalized setup
+    with sqlite3.connect(DB) as con:
+        data = con.execute("SELECT data FROM profile WHERE uid=?", 
+                          (message.chat.id,)).fetchone()
+    
+    if not data:
+        await message.reply_text(
+            "Please /setup your profile first for personalized trade setups."
+        )
+        return ConversationHandler.END
+        
+    profile = json.loads(data[0])
+    prompt = f"""Given user profile:
+    - Experience: {profile.get('experience')}
+    - Risk: {profile.get('risk')}
+    - Timeframe: {profile.get('timeframe')}
+    - Leverage: {profile.get('leverage')}
+    
+    Provide a detailed trade setup for {asset} with:
+    1. Current market context
+    2. Entry zones with reasoning
+    3. Stop loss placement
+    4. Take profit targets
+    5. Key levels to watch
+    6. Risk management considerations
+    """
+    
+    await message.reply_text("🧠 Analyzing market conditions...")
+    setup = await rei_call(prompt)
+    await message.reply_text(setup, parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
+
+async def provide_market_analysis(message: Message, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    asset = ctx.user_data.get('asset')
+    prompt = f"""Provide a comprehensive market analysis for {asset} including:
+    1. Current trend and market structure
+    2. Key support and resistance levels
+    3. Important technical indicators
+    4. Recent price action analysis
+    5. Potential catalysts to watch
+    """
+    
+    await message.reply_text("🧠 Analyzing market conditions...")
+    analysis = await rei_call(prompt)
+    await message.reply_text(analysis, parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
+
+async def provide_trade_suggestion(message: Message, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    # Get user profile for personalized suggestion
+    with sqlite3.connect(DB) as con:
+        data = con.execute("SELECT data FROM profile WHERE uid=?", 
+                          (message.chat.id,)).fetchone()
+    
+    if not data:
+        await message.reply_text(
+            "Please /setup your profile first for personalized suggestions."
+        )
+        return ConversationHandler.END
+        
+    profile = json.loads(data[0])
+    prompt = f"""Given user profile:
+    - Experience: {profile.get('experience')}
+    - Risk: {profile.get('risk')}
+    - Timeframe: {profile.get('timeframe')}
+    - Leverage: {profile.get('leverage')}
+    
+    Suggest the best trading opportunity right now with:
+    1. Asset selection with detailed reasoning
+    2. Entry zones with market context
+    3. Stop loss placement
+    4. Take profit targets
+    5. Key levels to watch
+    6. Risk management advice
+    """
+    
+    await message.reply_text("🧠 Analyzing market conditions...")
+    suggestion = await rei_call(prompt)
+    await message.reply_text(suggestion, parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
 
 # ───────────────────────────── main ─────────────────────────────────────── #
 def main() -> None:
@@ -349,6 +431,12 @@ def main() -> None:
                 ],
                 TRADE_CUSTOM: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_trade)
+                ],
+                TRADE_SETUP: [
+                    CallbackQueryHandler(handle_trade, pattern=r'^trade:'),
+                ],
+                TRADE_ANALYSIS: [
+                    CallbackQueryHandler(handle_trade, pattern=r'^trade:'),
                 ]
             },
             fallbacks=[CommandHandler('cancel', cancel)]
