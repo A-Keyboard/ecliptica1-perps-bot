@@ -106,6 +106,46 @@ OPTIONS: Final[Dict[str, List[str]]] = {
 # Add new constants
 TOP_ASSETS_COUNT = 5  # Number of top volume assets to show
 
+# Add a global dictionary to track user states
+user_states = {}  # Maps user_id -> {"processing": bool, "last_request_time": datetime}
+
+async def check_user_state(user_id: int) -> bool:
+    """
+    Check if a user has a request in progress.
+    Returns True if the user is free to make a new request, False otherwise.
+    """
+    global user_states
+    
+    now = datetime.now()
+    
+    # If user not in states or not processing, they're free
+    if user_id not in user_states or not user_states[user_id].get("processing", False):
+        # Update state to mark as free
+        user_states[user_id] = {"processing": False, "last_request_time": now}
+        return True
+        
+    # Check if it's been more than 5 minutes since their last request (failsafe for stuck states)
+    last_request = user_states[user_id].get("last_request_time", now - timedelta(minutes=10))
+    if (now - last_request).total_seconds() > 300:  # 5 minutes
+        logger.warning(f"Force clearing stuck state for user {user_id} after 5 minutes")
+        user_states[user_id] = {"processing": False, "last_request_time": now}
+        return True
+        
+    # User has a request in progress
+    return False
+
+async def set_user_processing(user_id: int, processing: bool) -> None:
+    """Set a user's processing state."""
+    global user_states
+    
+    now = datetime.now()
+    if user_id not in user_states:
+        user_states[user_id] = {"processing": processing, "last_request_time": now}
+    else:
+        user_states[user_id]["processing"] = processing
+        if processing:
+            user_states[user_id]["last_request_time"] = now
+
 # ───────────────────────────── environment ─────────────────────────────────── #
 def init_env() -> None:
     load_dotenv()
@@ -709,9 +749,20 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Received button_click call without callback query")
         return
 
-    logger.info(f"Received callback query with data: {query.data}")
+    user_id = query.from_user.id
+    logger.info(f"Received callback query with data: {query.data} from user {user_id}")
+    
+    # Check if user already has a request in progress
+    is_available = await check_user_state(user_id)
+    if not is_available:
+        logger.warning(f"User {user_id} already has a request in progress, ignoring new request")
+        await query.answer("Please wait for your current request to complete", show_alert=True)
+        return
     
     try:
+        # Mark user as processing
+        await set_user_processing(user_id, True)
+        
         # Start watchdog timer for this command
         start_watchdog()
         
@@ -726,6 +777,7 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=MAIN_MENU
             )
             stop_watchdog()
+            await set_user_processing(user_id, False)
             return
             
         action, value = query.data.split(":", 1)
@@ -734,7 +786,9 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # Special handling for setup:start action
         if action == "setup" and value == "start":
             stop_watchdog()
-            return await setup_start(query, ctx)
+            result = await setup_start(query, ctx)
+            await set_user_processing(user_id, False)
+            return result
             
         # For all other actions, check profile first
         profile = await get_user_profile(query.from_user.id)
@@ -754,6 +808,7 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=markup
             )
             stop_watchdog()
+            await set_user_processing(user_id, False)
             return
             
         profile_context = await format_profile_context(profile)
@@ -853,10 +908,14 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         
         # Make sure watchdog is stopped before returning
         stop_watchdog()
+        # Mark user as no longer processing
+        await set_user_processing(user_id, False)
             
     except Exception as e:
         # Make sure watchdog is stopped in case of error
         stop_watchdog()
+        # Mark user as no longer processing even if there was an error
+        await set_user_processing(user_id, False)
         logger.error(f"Error in button_click: {str(e)}", exc_info=True)
         try:
             await query.message.reply_text(
@@ -868,8 +927,9 @@ async def button_click(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_market_analysis(query, asset, profile_context, profile):
     """Handle market analysis request with reliable fallbacks."""
-    await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
+    user_id = query.from_user.id
     try:
+        await query.message.reply_text(f"📊 Analyzing {asset} market conditions...")
         logger.debug("Preparing market analysis prompt")
         prompt = (
             f"Provide a comprehensive market analysis for {asset}, considering the user's profile."
@@ -960,11 +1020,15 @@ async def handle_market_analysis(query, asset, profile_context, profile):
             get_fallback_response(asset, "market"),
             reply_markup=MAIN_MENU
         )
+    finally:
+        # Always release the user's processing state
+        await set_user_processing(user_id, False)
 
 async def handle_trade_setup(query, asset, profile_context, profile):
     """Handle trade setup request with reliable fallbacks."""
-    await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
+    user_id = query.from_user.id
     try:
+        await query.message.reply_text(f"🎯 Generating trade setup for {asset}...")
         logger.debug("Preparing trade setup prompt")
         prompt = (
             f"Provide a detailed trade setup analysis for {asset}, tailored to the user's profile."
@@ -1052,6 +1116,9 @@ async def handle_trade_setup(query, asset, profile_context, profile):
             get_fallback_response(asset, "setup"),
             reply_markup=MAIN_MENU
         )
+    finally:
+        # Always release the user's processing state
+        await set_user_processing(user_id, False)
 
 async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle custom asset input from user."""
