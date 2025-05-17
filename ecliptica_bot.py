@@ -1801,8 +1801,24 @@ async def handle_trade_setup(query, asset, profile_context, profile):
 async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle custom asset input from user."""
     asset = update.message.text.strip().upper()
-    logger.info(f"Received custom asset input: {asset}")
+    user_id = update.effective_user.id
+    logger.info(f"Received custom asset input: {asset} from user {user_id}")
     
+    # Check if user has a processing request
+    is_available = await check_user_state(user_id)
+    if not is_available:
+        logger.warning(f"User {user_id} already has a request in progress, ignoring")
+        await update.message.reply_text("Please wait for your current request to complete.")
+        return
+        
+    # Skip special commands/keywords that should not be treated as assets
+    special_keywords = ["SUBSCRIPTION", "ENTER CODE", "FAQ", "ASK AI", "TRADE", "SETUP"]
+    
+    for keyword in special_keywords:
+        if keyword in asset:
+            logger.info(f"Ignoring special keyword: {asset}")
+            return
+        
     if not asset:
         await update.message.reply_text("Please enter a valid asset symbol.")
         return
@@ -1811,6 +1827,9 @@ async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     if not asset.endswith("-PERP"):
         asset = f"{asset}-PERP"
     
+    # Mark user as processing
+    await set_user_processing(user_id, True)
+    
     # Create analysis options buttons
     buttons = [
         [InlineKeyboardButton("📊 Trade Setup (Entry/SL/TP)", callback_data=f"analysis:setup:{asset}")],
@@ -1818,10 +1837,15 @@ async def handle_custom_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     ]
     markup = InlineKeyboardMarkup(buttons)
     
-    await update.message.reply_text(
-        f"Choose analysis type for {asset}:",
-        reply_markup=markup
-    )
+    try:
+        await update.message.reply_text(
+            f"Choose analysis type for {asset}:",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Error creating analysis options: {str(e)}")
+        # Release user processing state on error
+        await set_user_processing(user_id, False)
 
 async def check_db_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to check database contents"""
@@ -1893,13 +1917,41 @@ def init_handlers(application: Application) -> None:
         states={
             SETUP: [CallbackQueryHandler(handle_setup, pattern=r'^setup:')]
         },
-            fallbacks=[CommandHandler('cancel', cancel)]
-        )
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
+    # Subscription conversation handler
+    sub_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler('subscription', subscription_cmd),
+            MessageHandler(filters.Regex('^💰 Subscription$'), subscription_cmd),
+            CallbackQueryHandler(handle_subscription_callback, pattern=r'^sub:')
+        ],
+        states={
+            SUBSCRIPTION: [CallbackQueryHandler(handle_subscription_callback, pattern=r'^sub:')],
+            ENTER_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code_entry)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
+    # Add Enter Code handler
+    enter_code_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler('entercode', enter_code_cmd),
+            MessageHandler(filters.Regex('^🎫 Enter Code$'), enter_code_cmd)
+        ],
+        states={
+            ENTER_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code_entry)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
     
     # Add all handlers
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.Regex('^▶️ Start$'), main_menu))
     application.add_handler(setup_conv)
+    application.add_handler(sub_conv)
+    application.add_handler(enter_code_conv)
     application.add_handler(CommandHandler('trade', trade_start))
     application.add_handler(MessageHandler(filters.Regex('^📊 Trade$'), trade_start))
     application.add_handler(CommandHandler('ask', ask_cmd))
@@ -1909,6 +1961,9 @@ def init_handlers(application: Application) -> None:
     application.add_handler(CommandHandler('help', help_cmd))
     application.add_handler(CommandHandler('checkdb', check_db_cmd))
     application.add_handler(CallbackQueryHandler(button_click, pattern=r'^(trade|analysis):'))
+    
+    # Add the custom asset handler as the LAST handler
+    # It should only receive messages that aren't caught by any of the above handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_asset))
 
 async def post_init(application: Application) -> None:
